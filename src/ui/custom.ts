@@ -1,0 +1,778 @@
+import {
+	Input,
+	Key,
+	Markdown,
+	matchesKey,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
+import type { Component, Focusable, MarkdownTheme } from "@earendil-works/pi-tui";
+import { draftFromDefault, draftIsEmpty, emptyDraft, finalizeAnswers, type DraftAnswer } from "../answers.ts";
+import type { AskUserAnswer, Deadline, NormalizedQuestion, NormalizedRequest } from "../types.ts";
+
+/** Structural theme surface the component needs (a real Pi Theme satisfies it). */
+export interface AskUserTheme {
+	fg(color: string, text: string): string;
+	bold(text: string): string;
+	italic?(text: string): string;
+	underline?(text: string): string;
+	strikethrough?(text: string): string;
+	inverse?(text: string): string;
+}
+
+export interface AskUserTUI {
+	requestRender(): void;
+	terminal?: { rows?: number; columns?: number };
+}
+
+export interface CustomUIResult {
+	kind: "submitted" | "cancelled" | "timeout" | "abort" | "error";
+	answers?: AskUserAnswer[];
+	message?: string;
+}
+
+export interface AskUserComponentOptions {
+	request: NormalizedRequest;
+	deadline: Deadline;
+	theme: AskUserTheme;
+	tui: AskUserTUI;
+	done: (result: CustomUIResult) => void;
+}
+
+/** Terminal/pane width at or above which the preview gets its own column. */
+export const SPLIT_MIN_WIDTH = 90;
+/**
+ * Rows needed for the full fixed chrome — title + free-input row + key hints.
+ * When the terminal is shorter, rows are dropped in this order: title, then
+ * hints, always keeping the free-input row while at least one row remains. With
+ * zero rows nothing is rendered. Below 3 rows the question title or the key
+ * hints may be missing, but `Esc` always cancels and the input stays operable.
+ */
+export const MIN_USABLE_ROWS = 3;
+const COLUMN_GAP = 2;
+const MIN_LEFT = 30;
+const MIN_PREVIEW = 24;
+const MAX_BODY_RATIO = 0.85;
+const DEFAULT_ROWS = 24;
+const TAB_LABEL_WIDTH = 14;
+const DESCRIPTION_INDENT = "       ";
+const MAX_TITLE_LINES = 2;
+const MAX_PROMPT_LINES = 3;
+const MAX_NOTICE_LINES = 2;
+
+function buildMarkdownTheme(theme: AskUserTheme): MarkdownTheme {
+	const color = (name: string) => (text: string) => theme.fg(name, text);
+	return {
+		heading: (text) => theme.bold(theme.fg("mdHeading", text)),
+		link: color("mdLink"),
+		linkUrl: color("mdLinkUrl"),
+		code: color("mdCode"),
+		codeBlock: color("mdCodeBlock"),
+		codeBlockBorder: color("mdCodeBlockBorder"),
+		quote: color("mdQuote"),
+		quoteBorder: color("mdQuoteBorder"),
+		hr: color("mdHr"),
+		listBullet: color("mdListBullet"),
+		bold: (text) => theme.bold(text),
+		italic: (text) => (theme.italic ? theme.italic(text) : text),
+		strikethrough: (text) => (theme.strikethrough ? theme.strikethrough(text) : text),
+		underline: (text) => (theme.underline ? theme.underline(text) : text),
+	};
+}
+
+function placeholderFor(question: NormalizedQuestion): string {
+	if (question.kind === "input") return "输入你的回答";
+	if (question.hasDefault) return "可选：补充说明或直接回车使用默认值";
+	return "可选：补充说明";
+}
+
+function clamp(value: number, min: number, max: number): number {
+	if (max < min) return min;
+	return Math.max(min, Math.min(max, value));
+}
+
+/**
+ * Return printable text for key input, or `undefined` for control keys and
+ * escape sequences. Multi-character paste payloads count as printable.
+ */
+function printableText(data: string): string | undefined {
+	if (data === "" || data.startsWith("\x1b")) return undefined;
+	for (const char of data) {
+		const code = char.codePointAt(0) ?? 0;
+		if (code < 0x20 || code === 0x7f) return undefined;
+	}
+	return data;
+}
+
+/**
+ * Custom terminal UI for AskUserUI.
+ *
+ * Layout: a fixed title/tabs/prompt/notice header, a scrollable body (options,
+ * and the preview either in a right column or stacked below), a **pinned free
+ * input row**, and a fixed key-hint row. The input row is never scrolled out of
+ * view, so no matter how long the option descriptions or preview are the user can
+ * always see and reach the free-input entry point.
+ *
+ * The whole questionnaire shares one deadline; no route degrades on cancel,
+ * timeout, or failure. `render(width)` never exceeds the requested width, and
+ * the total height never exceeds `terminal.rows` (see {@link MIN_USABLE_ROWS} for
+ * the documented degradation below the minimum).
+ */
+export class AskUserComponent implements Component, Focusable {
+	private readonly request: NormalizedRequest;
+	private readonly deadline: Deadline;
+	private readonly theme: AskUserTheme;
+	private readonly tui: AskUserTUI;
+	private readonly done: (result: CustomUIResult) => void;
+	private readonly drafts: DraftAnswer[];
+	private readonly cursors: number[];
+	private readonly inputs: Input[];
+	private readonly mdTheme: MarkdownTheme;
+	private readonly previewCache = new Map<string, Markdown>();
+
+	private tab = 0;
+	private notice: string | undefined;
+	private finished = false;
+	private timer: ReturnType<typeof setTimeout> | undefined;
+	private cachedWidth: number | undefined;
+	private cachedRows: number | undefined;
+	private cachedLines: string[] | undefined;
+	private previewScroll = 0;
+	private manualScroll = 0;
+	private viewport: { wide: boolean; maxBody: number; maxScroll: number } = {
+		wide: false,
+		maxBody: 1,
+		maxScroll: 0,
+	};
+	private _focused = false;
+
+	constructor(options: AskUserComponentOptions) {
+		this.request = options.request;
+		this.deadline = options.deadline;
+		this.theme = options.theme;
+		this.tui = options.tui;
+		this.done = options.done;
+		this.mdTheme = buildMarkdownTheme(options.theme);
+		this.drafts = options.request.questions.map(() => emptyDraft());
+		this.cursors = options.request.questions.map(() => 0);
+		this.inputs = options.request.questions.map(
+			(question) => new Input({ prompt: "› ", placeholder: placeholderFor(question) }),
+		);
+		const remaining = Math.max(0, this.deadline.remainingMs());
+		this.timer = setTimeout(() => this.finish({ kind: "timeout" }), remaining);
+	}
+
+	/**
+	 * Set by the TUI when focus changes. Emitting the cursor marker depends on it,
+	 * so a change invalidates cached lines.
+	 */
+	get focused(): boolean {
+		return this._focused;
+	}
+
+	set focused(value: boolean) {
+		if (this._focused === value) return;
+		this._focused = value;
+		this.cachedWidth = undefined;
+		this.cachedRows = undefined;
+	}
+
+	// -- lifecycle -----------------------------------------------------------
+
+	abort(): void {
+		this.finish({ kind: "abort" });
+	}
+
+	dispose(): void {
+		if (this.timer) {
+			clearTimeout(this.timer);
+			this.timer = undefined;
+		}
+	}
+
+	private finish(result: CustomUIResult): void {
+		if (this.finished) return;
+		this.finished = true;
+		this.dispose();
+		this.done(result);
+	}
+
+	invalidate(): void {
+		this.cachedWidth = undefined;
+		this.cachedRows = undefined;
+		for (const input of this.inputs) input.invalidate();
+		for (const markdown of this.previewCache.values()) markdown.invalidate();
+	}
+
+	private refresh(): void {
+		this.invalidate();
+		this.tui.requestRender();
+	}
+
+	private resetScroll(): void {
+		this.previewScroll = 0;
+		this.manualScroll = 0;
+	}
+
+	// -- tab helpers ---------------------------------------------------------
+
+	private get hasReview(): boolean {
+		return this.request.questions.length > 1;
+	}
+
+	private get tabCount(): number {
+		return this.request.questions.length + (this.hasReview ? 1 : 0);
+	}
+
+	private get isReview(): boolean {
+		return this.hasReview && this.tab === this.request.questions.length;
+	}
+
+	private currentQuestion(): NormalizedQuestion {
+		return this.request.questions[this.tab]!;
+	}
+
+	private rowCount(question: NormalizedQuestion): number {
+		return question.options.length + 1;
+	}
+
+	private rowIndex(): number {
+		if (this.isReview) return 0;
+		const question = this.currentQuestion();
+		return clamp(this.cursors[this.tab]!, 0, this.rowCount(question) - 1);
+	}
+
+	private isInputRow(): boolean {
+		if (this.isReview) return false;
+		return this.rowIndex() >= this.currentQuestion().options.length;
+	}
+
+	private moveTab(delta: number): void {
+		// Preserve typed text on the tab being left.
+		this.syncAllDrafts();
+		this.tab = (this.tab + delta + this.tabCount) % this.tabCount;
+		this.notice = undefined;
+		this.resetScroll();
+		this.refresh();
+	}
+
+	private moveRow(delta: number): void {
+		const question = this.currentQuestion();
+		this.cursors[this.tab] = clamp(this.rowIndex() + delta, 0, this.rowCount(question) - 1);
+		this.resetScroll();
+		this.refresh();
+	}
+
+	private moveRowToInput(): void {
+		this.cursors[this.tab] = this.currentQuestion().options.length;
+	}
+
+	// -- draft synchronisation ----------------------------------------------
+
+	/**
+	 * Copy the current tab's input value into its draft.
+	 *
+	 * The `Input` component owns the live text; drafts are the canonical answer.
+	 * Every path that reads or submits a draft must sync first, otherwise text
+	 * typed and then left via an option selection, a tab switch, or a review
+	 * submit would be lost.
+	 */
+	private syncDraftFromInput(index: number): void {
+		const draft = this.drafts[index];
+		const input = this.inputs[index];
+		if (!draft || !input) return;
+		draft.freeText = input.getValue();
+	}
+
+	private syncAllDrafts(): void {
+		for (let index = 0; index < this.inputs.length; index += 1) this.syncDraftFromInput(index);
+	}
+
+	/** Forward a key to the input and drop `usedDefault` if the text changed. */
+	private forwardToInput(data: string): void {
+		const input = this.inputs[this.tab]!;
+		const before = input.getValue();
+		input.handleInput(data);
+		if (input.getValue() !== before) this.drafts[this.tab]!.usedDefault = false;
+	}
+
+	// -- scrolling -----------------------------------------------------------
+
+	private scrollBy(direction: -1 | 1): void {
+		if (this.viewport.maxScroll <= 0) return;
+		const page = Math.max(1, this.viewport.maxBody - 1);
+		if (this.viewport.wide) {
+			this.previewScroll = clamp(this.previewScroll + direction * page, 0, this.viewport.maxScroll);
+		} else {
+			this.manualScroll = clamp(this.manualScroll + direction * page, 0, this.viewport.maxScroll);
+		}
+		this.refresh();
+	}
+
+	private isScrollKey(data: string): boolean {
+		if (matchesKey(data, Key.pageUp)) {
+			this.scrollBy(-1);
+			return true;
+		}
+		if (matchesKey(data, Key.pageDown)) {
+			this.scrollBy(1);
+			return true;
+		}
+		if (this.isInputRow()) return false;
+		if (matchesKey(data, "ctrl+u") || data === "[") {
+			this.scrollBy(-1);
+			return true;
+		}
+		if (matchesKey(data, "ctrl+d") || data === "]") {
+			this.scrollBy(1);
+			return true;
+		}
+		return false;
+	}
+
+	// -- key handling --------------------------------------------------------
+
+	handleInput(data: string): void {
+		if (this.finished) return;
+
+		if (matchesKey(data, Key.escape)) {
+			this.finish({ kind: "cancelled" });
+			return;
+		}
+		if (matchesKey(data, "ctrl+enter")) {
+			this.submitAll();
+			return;
+		}
+		if (matchesKey(data, "shift+tab")) {
+			this.moveTab(-1);
+			return;
+		}
+		if (matchesKey(data, Key.tab)) {
+			this.moveTab(1);
+			return;
+		}
+		if (this.isScrollKey(data)) return;
+
+		if (this.isReview) {
+			if (matchesKey(data, Key.enter)) this.submitAll();
+			return;
+		}
+
+		const question = this.currentQuestion();
+		if (question.kind === "input") {
+			this.cursors[this.tab] = question.options.length;
+		}
+
+		if (this.isInputRow()) {
+			// Up returns to the options instead of being swallowed by the input.
+			if (question.options.length > 0 && (matchesKey(data, Key.up) || matchesKey(data, "ctrl+p"))) {
+				this.moveRow(-1);
+				return;
+			}
+			if (matchesKey(data, "shift+enter")) {
+				this.forwardToInput(data);
+				this.refresh();
+				return;
+			}
+			if (matchesKey(data, Key.enter)) {
+				this.commitAndAdvance();
+				return;
+			}
+			this.forwardToInput(data);
+			this.refresh();
+			return;
+		}
+
+		if (matchesKey(data, Key.up) || matchesKey(data, "ctrl+p")) {
+			this.moveRow(-1);
+			return;
+		}
+		if (matchesKey(data, Key.down) || matchesKey(data, "ctrl+n")) {
+			this.moveRow(1);
+			return;
+		}
+		if (matchesKey(data, Key.space)) {
+			this.toggleRow();
+			return;
+		}
+		if (matchesKey(data, Key.enter)) {
+			this.onOptionEnter();
+			return;
+		}
+		if (matchesKey(data, "s")) {
+			this.skipWithDefault();
+			return;
+		}
+
+		const printable = printableText(data);
+		if (printable !== undefined) {
+			this.moveRowToInput();
+			this.forwardToInput(data);
+			this.refresh();
+		}
+	}
+
+	private onOptionEnter(): void {
+		const question = this.currentQuestion();
+		if (question.kind === "multi") {
+			this.toggleRow();
+			return;
+		}
+		// Sync any typed note before advancing, so selecting an option never drops
+		// free text that was entered from the pinned input row.
+		this.syncDraftFromInput(this.tab);
+		// Single-select: Enter picks and advances. A note can be added first by
+		// moving down to the free-input row.
+		const row = this.rowIndex();
+		this.drafts[this.tab]!.selections = [row];
+		this.drafts[this.tab]!.usedDefault = false;
+		this.notice = undefined;
+		this.resetScroll();
+		this.advance();
+	}
+
+	private toggleRow(): void {
+		this.syncDraftFromInput(this.tab);
+		const row = this.rowIndex();
+		const draft = this.drafts[this.tab]!;
+		if (draft.selections.includes(row)) {
+			draft.selections = draft.selections.filter((index) => index !== row);
+		} else {
+			draft.selections = [...draft.selections, row].sort((a, b) => a - b);
+		}
+		draft.usedDefault = false;
+		this.notice = undefined;
+		this.resetScroll();
+		this.refresh();
+	}
+
+	private skipWithDefault(): void {
+		const question = this.currentQuestion();
+		const fallback = draftFromDefault(question);
+		if (!fallback) {
+			this.notice = "该题没有默认值，必须作答。";
+			this.refresh();
+			return;
+		}
+		this.drafts[this.tab] = fallback;
+		this.inputs[this.tab]!.setValue(fallback.freeText);
+		this.notice = undefined;
+		this.resetScroll();
+		this.advance();
+	}
+
+	private commitAndAdvance(): void {
+		const question = this.currentQuestion();
+		this.syncDraftFromInput(this.tab);
+		const draft = this.drafts[this.tab]!;
+		if (draftIsEmpty(draft) && !question.hasDefault) {
+			this.notice = "这是必答题：请选择选项或输入文本。";
+			this.refresh();
+			return;
+		}
+		this.notice = undefined;
+		this.resetScroll();
+		this.advance();
+	}
+
+	private advance(): void {
+		// Any transition may lead to a review or submit, so fold every tab's live
+		// input text into its draft first.
+		this.syncAllDrafts();
+		if (this.request.questions.length === 1) {
+			this.submitAll();
+			return;
+		}
+		if (this.tab < this.request.questions.length - 1) {
+			this.tab += 1;
+			this.notice = undefined;
+			this.resetScroll();
+			this.refresh();
+			return;
+		}
+		this.tab = this.request.questions.length;
+		this.notice = undefined;
+		this.resetScroll();
+		this.refresh();
+	}
+
+	private submitAll(): void {
+		// Final safety net: never submit from stale drafts.
+		this.syncAllDrafts();
+		const { answers, unanswered } = finalizeAnswers(this.request.questions, this.drafts);
+		if (unanswered.length > 0) {
+			const first = unanswered[0]!;
+			this.tab = first;
+			this.cursors[first] = 0;
+			this.notice = `第 ${first + 1} 题还没有答案，请先作答。`;
+			this.resetScroll();
+			this.refresh();
+			return;
+		}
+		this.finish({ kind: "submitted", answers });
+	}
+
+	// -- rendering helpers ---------------------------------------------------
+
+	private padTo(line: string, width: number): string {
+		const visible = visibleWidth(line);
+		if (visible >= width) return line;
+		return line + " ".repeat(width - visible);
+	}
+
+	private wrap(text: string, width: number): string[] {
+		return wrapTextWithAnsi(text, Math.max(1, width));
+	}
+
+	private markdownFor(text: string): Markdown {
+		let instance = this.previewCache.get(text);
+		if (!instance) {
+			instance = new Markdown(text, 0, 0, this.mdTheme);
+			this.previewCache.set(text, instance);
+		}
+		return instance;
+	}
+
+	private currentPreview(): string {
+		if (this.isReview) return "";
+		const question = this.currentQuestion();
+		const draft = this.drafts[this.tab]!;
+		const row = this.isInputRow() ? (draft.selections[0] ?? -1) : this.rowIndex();
+		const option = question.options[row];
+		return option?.preview ?? "";
+	}
+
+	private autoOffset(total: number, focusLine: number, height: number): number {
+		if (total <= height) return 0;
+		return clamp(focusLine - Math.floor(height / 2), 0, total - height);
+	}
+
+	private renderTabs(width: number): string {
+		const inverse = this.theme.inverse ?? ((text: string) => text);
+		const chips: string[] = [];
+		this.request.questions.forEach((question, index) => {
+			const draft = this.drafts[index]!;
+			const answered = !draftIsEmpty(draft) || question.hasDefault;
+			const marker = answered ? "●" : "○";
+			const label = truncateToWidth(question.title, TAB_LABEL_WIDTH);
+			const chip = `${marker} ${index + 1}.${label}`;
+			chips.push(
+				index === this.tab
+					? inverse(this.theme.fg("accent", ` ${chip} `))
+					: this.theme.fg(answered ? "success" : "muted", ` ${chip} `),
+			);
+		});
+		if (this.hasReview) {
+			const chip = "✓ 提交";
+			chips.push(
+				this.isReview ? inverse(this.theme.fg("accent", ` ${chip} `)) : this.theme.fg("muted", ` ${chip} `),
+			);
+		}
+		return truncateToWidth(chips.join(this.theme.fg("dim", "│")), width);
+	}
+
+	private renderOptionRow(question: NormalizedQuestion, index: number, width: number): string[] {
+		const draft = this.drafts[this.tab]!;
+		const row = this.rowIndex();
+		const isCursor = !this.isInputRow() && index === row;
+		const selected = draft.selections.includes(index);
+		const cursorMark = isCursor ? this.theme.fg("accent", "▸") : " ";
+		const box = question.kind === "multi" ? (selected ? "▣" : "▢") : selected ? "◉" : "○";
+		const selectedMark = selected ? this.theme.fg("success", box) : this.theme.fg("muted", box);
+		const label = question.options[index]!.label;
+		const labelText = isCursor ? this.theme.bold(label) : label;
+		const lines = [truncateToWidth(`  ${cursorMark} ${selectedMark} ${index + 1}. ${labelText}`, width)];
+		const description = question.options[index]!.description;
+		if (description) {
+			// Wrap to the option column instead of hard-truncating the text.
+			for (const wrapped of this.wrap(description, Math.max(1, width - DESCRIPTION_INDENT.length))) {
+				lines.push(truncateToWidth(this.theme.fg("muted", `${DESCRIPTION_INDENT}${wrapped}`), width));
+			}
+		}
+		return lines;
+	}
+
+	/** Options only (no input row): the input stays pinned outside the body. */
+	private renderOptions(width: number): { lines: string[]; focusLine: number } {
+		const question = this.currentQuestion();
+		const lines: string[] = [];
+		let focusLine = 0;
+		for (let index = 0; index < question.options.length; index += 1) {
+			if (!this.isInputRow() && index === this.rowIndex()) focusLine = lines.length;
+			lines.push(...this.renderOptionRow(question, index, width));
+		}
+		return { lines: lines.map((line) => truncateToWidth(line, width)), focusLine };
+	}
+
+	private renderBodyArea(width: number, height: number): string[] {
+		if (height <= 0) return [];
+		if (this.isReview) {
+			const lines = this.renderReview(width);
+			const maxScroll = Math.max(0, lines.length - height);
+			this.viewport = { wide: false, maxBody: height, maxScroll };
+			this.manualScroll = clamp(this.manualScroll, 0, maxScroll);
+			return lines.slice(this.manualScroll, this.manualScroll + height);
+		}
+
+		const preview = this.currentPreview();
+		const wide = preview.trim() !== "" && width >= SPLIT_MIN_WIDTH;
+
+		if (wide) {
+			const half = Math.floor(width * 0.5);
+			const maxLeft = Math.max(1, width - COLUMN_GAP - 1);
+			const lowLeft = Math.min(MIN_LEFT, maxLeft);
+			const highLeft = Math.max(lowLeft, Math.min(maxLeft, width - COLUMN_GAP - MIN_PREVIEW));
+			const leftWidth = clamp(half, lowLeft, highLeft);
+			const rightWidth = Math.max(1, width - leftWidth - COLUMN_GAP);
+			const projection = this.renderOptions(leftWidth);
+			const right = this.markdownFor(preview).render(rightWidth);
+			const leftOffset = this.autoOffset(projection.lines.length, projection.focusLine, height);
+			const maxScroll = Math.max(0, right.length - height);
+			this.viewport = { wide: true, maxBody: height, maxScroll };
+			this.previewScroll = clamp(this.previewScroll, 0, maxScroll);
+			const gap = " ".repeat(COLUMN_GAP);
+			const totalRows = Math.max(projection.lines.length - leftOffset, right.length - this.previewScroll);
+			const visibleCount = clamp(totalRows, 1, height);
+			const merged: string[] = [];
+			for (let index = 0; index < visibleCount; index += 1) {
+				const leftLine = projection.lines[leftOffset + index] ?? "";
+				const rightLine = right[this.previewScroll + index] ?? "";
+				merged.push(
+					this.padTo(truncateToWidth(leftLine, leftWidth), leftWidth) +
+						gap +
+						truncateToWidth(rightLine, rightWidth),
+				);
+			}
+			return merged;
+		}
+
+		const projection = this.renderOptions(width);
+		const lines = projection.lines.slice();
+		if (preview.trim() !== "") {
+			lines.push("");
+			lines.push(this.theme.fg("border", "─".repeat(width)));
+			lines.push(this.theme.fg("muted", "预览："));
+			lines.push(...this.markdownFor(preview).render(width));
+		}
+		const maxScroll = Math.max(0, lines.length - height);
+		this.viewport = { wide: false, maxBody: height, maxScroll };
+		this.manualScroll = clamp(this.manualScroll, 0, maxScroll);
+		const offset =
+			this.manualScroll > 0 ? this.manualScroll : this.autoOffset(lines.length, projection.focusLine, height);
+		return lines.slice(offset, offset + height);
+	}
+
+	/** The free-input row, rendered as a fixed line that never scrolls away. */
+	private renderInputBar(width: number): string[] {
+		const input = this.inputs[this.tab]!;
+		input.focused = this.focused && this.isInputRow();
+		return input
+			.render(Math.max(1, width - 2))
+			.slice(0, 1)
+			.map((line) => truncateToWidth(`  ${line}`, width));
+	}
+
+	private renderSubmitBar(width: number): string[] {
+		return [truncateToWidth(this.theme.fg("accent", "  [ Enter 提交 ]"), width)];
+	}
+
+	private renderReview(width: number): string[] {
+		const lines: string[] = [];
+		this.request.questions.forEach((question, index) => {
+			const draft = this.drafts[index]!;
+			const answered = !draftIsEmpty(draft) || question.hasDefault;
+			const mark = answered ? this.theme.fg("success", "✓") : this.theme.fg("warning", "!");
+			lines.push(truncateToWidth(`${mark} ${this.theme.bold(`${index + 1}. ${question.title}`)}`, width));
+			lines.push(truncateToWidth(this.theme.fg("muted", `   ${this.describeDraft(question, draft)}`), width));
+		});
+		return lines;
+	}
+
+	private describeDraft(question: NormalizedQuestion, draft: DraftAnswer): string {
+		const parts: string[] = [];
+		if (draft.selections.length > 0) {
+			parts.push(draft.selections.map((index) => question.options[index]?.label ?? `#${index + 1}`).join(", "));
+		}
+		const freeText = draft.freeText.trim();
+		if (freeText !== "") parts.push(`“${freeText}”`);
+		if (parts.length === 0) {
+			const fallback = draftFromDefault(question);
+			if (fallback) return `将使用默认值：${question.default}`;
+			return "（未作答）";
+		}
+		const suffix = draft.usedDefault ? "（默认值）" : "";
+		return parts.join(" | ") + suffix;
+	}
+
+	private hintLine(): string {
+		if (this.isReview) return this.theme.fg("dim", "Enter 提交 · Tab 切换问题 · Esc 取消");
+		const question = this.currentQuestion();
+		const hints = ["Tab 切换", "↑/↓ 移动", `Enter ${this.isInputRow() ? "确认" : "选择"}`];
+		if (question.kind === "multi") hints.push("空格 多选");
+		if (question.hasDefault) hints.push("s 用默认值");
+		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn 预览");
+		if (this.isInputRow() && question.options.length > 0) hints.push("↑ 回选项");
+		hints.push("Esc 取消");
+		return this.theme.fg("dim", hints.join(" · "));
+	}
+
+	render(width: number): string[] {
+		const lineWidth = Math.max(1, Math.floor(width));
+		const physical = Math.max(0, Math.floor(this.tui.terminal?.rows ?? DEFAULT_ROWS));
+		if (this.cachedLines && this.cachedWidth === lineWidth && this.cachedRows === physical) return this.cachedLines;
+		if (physical === 0) {
+			this.cachedWidth = lineWidth;
+			this.cachedRows = physical;
+			this.cachedLines = [];
+			return [];
+		}
+
+		// Fixed blocks, with the free-input row and key hints guaranteed highest
+		// priority so they survive a short terminal.
+		const titleText = this.isReview
+			? "提交前确认"
+			: `${this.currentQuestion().index + 1}/${this.request.questions.length}. ${this.currentQuestion().title}`;
+		const titleBlock = this.wrap(this.theme.bold(this.theme.fg("accent", titleText)), lineWidth).slice(
+			0,
+			MAX_TITLE_LINES,
+		);
+		const tabsBlock = this.request.questions.length > 1 ? [this.renderTabs(lineWidth)] : [];
+		const prompt = this.isReview ? undefined : this.currentQuestion().prompt?.trim();
+		const promptBlock = prompt
+			? this.wrap(this.theme.fg("text", prompt), lineWidth).slice(0, MAX_PROMPT_LINES)
+			: [];
+		const noticeBlock = this.notice
+			? this.wrap(this.theme.fg("warning", `⚠ ${this.notice}`), lineWidth).slice(0, MAX_NOTICE_LINES)
+			: [];
+		const inputBlock = this.isReview ? this.renderSubmitBar(lineWidth) : this.renderInputBar(lineWidth);
+		const hintBlock = [this.hintLine()];
+
+		let remaining = physical;
+		const take = (block: string[]): string[] => {
+			if (remaining <= 0 || block.length === 0) return [];
+			const use = Math.min(block.length, remaining);
+			remaining -= use;
+			return block.slice(0, use);
+		};
+		const inputOut = take(inputBlock);
+		const hintOut = take(hintBlock);
+		const titleOut = take(titleBlock);
+		const tabsOut = take(tabsBlock);
+		const noticeOut = take(noticeBlock);
+		const promptOut = take(promptBlock);
+		const bodyOut = remaining > 0 ? this.renderBodyArea(lineWidth, remaining) : [];
+
+		const lines = [...titleOut, ...tabsOut, ...promptOut, ...noticeOut, ...bodyOut, ...inputOut, ...hintOut];
+		const finalLines = lines.slice(0, physical).map((line) => truncateToWidth(line, lineWidth));
+		this.cachedWidth = lineWidth;
+		this.cachedRows = physical;
+		this.cachedLines = finalLines;
+		return finalLines;
+	}
+}
+
+/** Build a submitted answer purely from drafts (used by tests and callers). */
+export function answersFromDrafts(questions: NormalizedQuestion[], drafts: DraftAnswer[]): AskUserAnswer[] {
+	return finalizeAnswers(questions, drafts).answers;
+}

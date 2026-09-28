@@ -1,0 +1,48 @@
+{
+  "name": "pi-ask-user",
+  "version": "0.1.0",
+  "description": "AskUserUI - a host-adaptive ask-user interaction component/tool for Pi extensions and MCP bridges (custom TUI, native dialogs, or plain text)",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "ask_user",
+    "AskUserUI",
+    "interactive"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./mcp": "./src/adapters/mcp.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.87.0",
+    "@earendil-works/pi-tui": ">=0.87.0",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1",
+    "@types/node": "22.10.2",
+    "typebox": "1.3.27",
+    "typescript": "5.9.3"
+  }
+}
