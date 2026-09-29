@@ -4,13 +4,22 @@
  *
  * Load with: pi --extension ./examples/reuse.ts
  *
- * Capabilities are declared by this trusted adapter, not by the model. In TUI
- * mode `createPiHost` declares custom UI. For an RPC/ACP host whose client really
- * answers the dialog sub-protocol, pass native support explicitly:
+ * The route is forced by configuration, never detected: `createPiHost` resolves
+ * `custom` | `native` | `text` from the programmatic option, then from
+ * `PI_ASK_USER_UI_MODE`, then from the default `native`. The model cannot change
+ * it — there is no route field in the tool parameters.
  *
- *   createPiHost(ctx, { capabilities: { nativeDialogs: true } })
+ * Force a route explicitly when you know what this command needs:
  *
- * Without that, RPC takes the plain-text route.
+ *   createPiHost(ctx, { mode: "text" })    // never block: queue/deliver as text
+ *   createPiHost(ctx, { mode: "custom" })  // a real Pi TUI only
+ *   askUser(request, { host: createPiHost(ctx), mode: "text" })
+ *
+ * The per-call `mode` is the highest precedence: it overrides the adapter's own
+ * configuration and even an invalid `PI_ASK_USER_UI_MODE`, and it works because
+ * `createPiHost` binds the implementations wherever they can really run,
+ * independently of the configured route. A forced route with no bound
+ * implementation (or an invalid value) is an actionable error, never a fallback.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { askUser, createPiHost, type AskUserResult } from "../src/index.ts";
@@ -36,6 +45,13 @@ export default function (pi: ExtensionAPI) {
 				},
 				{ host: createPiHost(ctx) },
 			);
+
+			// A forced route the environment cannot run is an actionable error,
+			// never a silent fallback — surface it instead of guessing.
+			if (result.status === "error") {
+				ctx.ui.notify(`AskUserUI 失败（${result.error?.code}）：${result.error?.message}`, "error");
+				return;
+			}
 
 			if (result.status === "answered") {
 				ctx.ui.notify(

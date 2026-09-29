@@ -1,8 +1,18 @@
 import { combineSignals, createDeadline, safeTimeoutMs } from "./deadline.ts";
+import { UI_MODE_ENV_VAR, resolveUIMode } from "./mode.ts";
 import { formatPlainText } from "./plaintext.ts";
-import { hostCapabilities, pickRoute } from "./route.ts";
+import { hostCapabilities } from "./route.ts";
 import { AskUserValidationError, normalizeAskUserRequest } from "./schema.ts";
-import type { AskUIInput, AskUIOutcome, AskUserOptions, AskUserResult, NormalizedRequest } from "./types.ts";
+import type {
+	AskUIInput,
+	AskUIOutcome,
+	AskUserError,
+	AskUserHost,
+	AskUserOptions,
+	AskUserResult,
+	AskUserUIMode,
+	NormalizedRequest,
+} from "./types.ts";
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -10,7 +20,8 @@ function messageOf(error: unknown): string {
 
 /**
  * The single reusable entry point. Accepts raw (usually model-produced) input,
- * normalizes it, then routes it through the host's declared capabilities.
+ * normalizes it, then runs it through the **forced** UI route resolved by the
+ * host adapter (or by `options.mode`).
  *
  * Import this from another extension to reuse the interaction without going
  * through the model:
@@ -31,7 +42,7 @@ export async function askUser(raw: unknown, options: AskUserOptions): Promise<As
 			error instanceof AskUserValidationError ? error.message : `请求无效：${messageOf(error)}`;
 		return {
 			status: "error",
-			route: "plain_text",
+			route: "text",
 			answers: [],
 			deferred: false,
 			error: { code: "invalid_request", message },
@@ -47,8 +58,15 @@ export async function askUserNormalized(
 	warnings: string[] = [],
 ): Promise<AskUserResult> {
 	const { host, signal, onUpdate, now } = options;
-	const capabilities = hostCapabilities(host);
-	const route = pickRoute(capabilities);
+	// The route is forced: configuration decides, nothing is detected.
+	const forced = resolveForcedMode(options, host);
+	if (!forced.ok) {
+		return finish(
+			{ status: "error", route: "text", answers: [], deferred: false, error: forced.error },
+			warnings,
+		);
+	}
+	const route = forced.mode;
 	// Cancellation is checked before any route branch, so an already-aborted call
 	// never queues a plain-text questionnaire or renders an interactive UI.
 	if (signal?.aborted) {
@@ -56,7 +74,7 @@ export async function askUserNormalized(
 	}
 
 	const plainText = formatPlainText(request);
-	if (route === "plain_text") {
+	if (route === "text") {
 		const hook = host.plainText;
 		// A working output hook defers the append until after the model's final
 		// answer (Pi's `message_end` path).
@@ -79,10 +97,17 @@ export async function askUserNormalized(
 				);
 			}
 		}
-		// No output hook at all (e.g. a generic MCP client): this is a normal
-		// fallback. Deliver the formatted questionnaire inline; the question stays
-		// unanswered and the caller replies on the next turn.
+		// No output hook at all (e.g. a generic MCP client): the normal outcome of
+		// the text route. Deliver the formatted questionnaire inline; the question
+		// stays unanswered and the caller replies on the next turn.
 		return finish({ status: "delivered", route, answers: [], plainText, deferred: false }, warnings);
+	}
+
+	// A forced interactive route runs only when the host really binds the
+	// implementation. Otherwise this is an actionable error: no probing, no
+	// downgrade to another route, and no question asked.
+	if (!hostSupportsMode(host, route)) {
+		return finish(unsupportedModeResult(host, route), warnings);
 	}
 
 	const deadline = createDeadline(request.totalTimeoutMs, now);
@@ -189,6 +214,69 @@ function raceWithDeadline(
 		// not accumulate listeners on a long-lived caller signal.
 		if (abortHandler && callerSignal) callerSignal.removeEventListener("abort", abortHandler);
 	});
+}
+
+type ForcedMode = { ok: true; mode: AskUserUIMode } | { ok: false; error: AskUserError };
+
+/**
+ * Resolve the forced route for one call. The per-call programmatic `mode` is
+ * genuinely the highest precedence: it wins over the host adapter's own
+ * configuration *and* over a configuration the adapter already rejected (e.g.
+ * an unparsable `PI_ASK_USER_UI_MODE`), because the caller is trusted code that
+ * has spoken last. Only when no per-call mode is supplied do the adapter's
+ * resolution and its `configError` apply; below that sits the default.
+ */
+function resolveForcedMode(options: AskUserOptions, host: AskUserHost): ForcedMode {
+	if (options.mode !== undefined) {
+		const resolution = resolveUIMode(options.mode, undefined);
+		if (!resolution.ok) {
+			return { ok: false, error: { code: "invalid_config", message: resolution.message } };
+		}
+		return { ok: true, mode: resolution.mode };
+	}
+	if (host.configError) return { ok: false, error: host.configError };
+	const resolution = resolveUIMode(undefined, host.mode);
+	if (!resolution.ok) {
+		return { ok: false, error: { code: "invalid_config", message: resolution.message } };
+	}
+	return { ok: true, mode: resolution.mode };
+}
+
+/** True when the host binds a real implementation for the forced interactive route. */
+function hostSupportsMode(host: AskUserHost, mode: "custom" | "native"): boolean {
+	const capabilities = hostCapabilities(host);
+	return mode === "custom" ? capabilities.customUI : capabilities.nativeDialogs;
+}
+
+/**
+ * The forced route cannot run here. This is never a fallback: nothing is
+ * rendered, no question is asked, and `plainText` is never populated.
+ *
+ * The requirement text is host-specific so the message is actionable for the
+ * adapter actually in use: an MCP bridge is told it needs an elicitation
+ * function/client support, a Pi host is told it needs `ctx.hasUI` and a
+ * callable `ctx.ui.input` (or, for `custom`, a real TUI).
+ */
+function unsupportedModeResult(host: AskUserHost, mode: "custom" | "native"): AskUserResult {
+	const requirement =
+		mode === "custom"
+			? "自定义 UI 只在真实 Pi TUI 中可用（宿主需处于 tui 模式并提供可调用的 ctx.ui.custom()）"
+			: host.name === "mcp"
+				? "原生对话框需要宿主提供 elicitation 函数（createMCPHost({ elicit })），且 MCP 客户端支持 elicitation"
+				: "原生对话框需要 ctx.hasUI 且 ctx.ui.input 可调用";
+	return {
+		status: "error",
+		route: mode,
+		answers: [],
+		deferred: false,
+		error: {
+			code: "unsupported_mode",
+			message:
+				`强制的 UI 模式 “${mode}” 在当前环境不可用：${requirement}。` +
+				`本次没有提问，也没有回退到其他路由。请显式改用 mode: "text"（或设置 ${UI_MODE_ENV_VAR}=text），` +
+				"或在支持该模式的宿主中运行。",
+		},
+	};
 }
 
 function mapOutcome(

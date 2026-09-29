@@ -38,7 +38,13 @@ const QuestionSchema = Type.Object({
 	default: Type.Optional(Type.String({ maxLength: LIMITS.defaultValue })),
 });
 
-/** Parameter schema registered for the `AskUserUI` tool. */
+/**
+ * Parameter schema registered for the `AskUserUI` tool.
+ *
+ * It deliberately carries no UI-mode field: the route is chosen by host
+ * configuration (programmatic `mode` > `PI_ASK_USER_UI_MODE` > `native`), never
+ * by the model.
+ */
 export const AskUserUIParams = Type.Object({
 	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: MAX_QUESTIONS }),
 	header: Type.Optional(Type.String({ maxLength: LIMITS.header })),
@@ -233,7 +239,10 @@ export function normalizeAskUserRequest(raw: unknown): { request: NormalizedRequ
 	});
 
 	const header = firstString(container, ["header", "title", "heading"]);
-	const displayModeRaw = asString(container.displayMode ?? container.display_mode ?? container.mode)?.trim();
+	// Only the display aliases are read here. `mode` is deliberately NOT one of
+	// them: the UI route is host configuration and a model parameter must never
+	// influence it (a `mode` key in the input is ignored).
+	const displayModeRaw = asString(container.displayMode ?? container.display_mode)?.trim();
 	const displayMode: "overlay" | "inline" = displayModeRaw === "inline" ? "inline" : "overlay";
 
 	const perQuestion = Number(container.timeoutPerQuestionMs ?? container.timeout_per_question_ms);

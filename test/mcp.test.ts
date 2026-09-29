@@ -26,13 +26,90 @@ test("an MCP host with elicitation declares nativeDialogs only", () => {
 	assert.deepEqual(hostCapabilities(host), { customUI: false, nativeDialogs: true });
 });
 
-test("without elicitation the questionnaire is delivered inline as a normal fallback", async () => {
+test("the unconfigured MCP host defaults to native, with no inference from elicit", () => {
+	assert.equal(createMCPHost().mode, "native");
+	assert.equal(createMCPHost({ elicit: async () => ({ action: "cancel" }) }).mode, "native");
+});
+
+test("the environment variable and programmatic option resolve for MCP too", () => {
+	// Env only.
+	assert.equal(createMCPHost({ env: { PI_ASK_USER_UI_MODE: "text" } }).mode, "text");
+	// Programmatic beats env.
+	assert.equal(
+		createMCPHost({ mode: "text", env: { PI_ASK_USER_UI_MODE: "native" } }).mode,
+		"text",
+	);
+	assert.equal(
+		createMCPHost({ mode: "native", env: { PI_ASK_USER_UI_MODE: "text" } }).mode,
+		"native",
+	);
+});
+
+test("an invalid MCP environment value is recorded as configError", () => {
+	const host = createMCPHost({ env: { PI_ASK_USER_UI_MODE: "nope" } });
+	assert.equal(host.mode, undefined);
+	assert.equal(host.configError?.code, "invalid_config");
+	assert.match(host.configError?.message ?? "", /PI_ASK_USER_UI_MODE/);
+});
+
+test("the default native mode without elicitation is unsupported_mode, not silent text", async () => {
 	const result = await askUser(BASIC, { host: createMCPHost() });
-	assert.equal(result.route, "plain_text");
+	assert.equal(result.route, "native");
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "unsupported_mode");
+	assert.equal(result.plainText, undefined, "no text may be delivered on a refused route");
+	// MCP-specific diagnostics: name the elicitation requirement, never the
+	// Pi-only ctx.hasUI / ctx.ui.input requirement.
+	assert.match(result.error?.message ?? "", /elicitation/);
+	assert.match(result.error?.message ?? "", /createMCPHost/);
+	assert.doesNotMatch(result.error?.message ?? "", /ctx\.ui\.input/);
+	assert.doesNotMatch(result.error?.message ?? "", /ctx\.hasUI/);
+});
+
+test("generic no-elicitation delivery requires an explicit text mode", async () => {
+	const result = await askUser(BASIC, { host: createMCPHost({ mode: "text" }) });
+	assert.equal(result.route, "text");
 	assert.equal(result.status, "delivered");
 	assert.equal(result.deferred, false);
 	assert.equal(result.error, undefined, "a missing hook must not be reported as an error");
 	assert.ok(result.plainText && result.plainText.includes("自由输入"));
+});
+
+test("a per-call mode override works on the MCP host", async () => {
+	const elicit: MCPElicitFn = async () => ({ action: "accept", content: { answer: "1" } });
+	// The adapter is configured for text, but the call forces native.
+	const result = await askUser(BASIC, {
+		host: createMCPHost({ mode: "text", elicit }),
+		mode: "native",
+	});
+	assert.equal(result.route, "native");
+	assert.equal(result.status, "answered");
+	assert.deepEqual(result.answers[0]!.selections, ["staging"]);
+});
+
+test("a per-call override cannot conjure a missing implementation", async () => {
+	const result = await askUser(BASIC, {
+		host: createMCPHost({ mode: "text" }),
+		mode: "native",
+	});
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "unsupported_mode");
+	// The same host-specific diagnostics apply on the per-call override path.
+	assert.match(result.error?.message ?? "", /elicitation/);
+	assert.doesNotMatch(result.error?.message ?? "", /ctx\.ui\.input/);
+});
+
+test("forcing a route the bridge cannot run is unsupported_mode, not a downgrade", async () => {
+	const custom = await askUser(BASIC, { host: createMCPHost({ mode: "custom" }) });
+	assert.equal(custom.route, "custom");
+	assert.equal(custom.status, "error");
+	assert.equal(custom.error?.code, "unsupported_mode");
+	assert.equal(custom.plainText, undefined);
+
+	const native = await askUser(BASIC, { host: createMCPHost({ mode: "native" }) });
+	assert.equal(native.route, "native");
+	assert.equal(native.status, "error");
+	assert.equal(native.error?.code, "unsupported_mode");
 });
 
 test("the delivered tool-result text is a complete questionnaire with no preview and no duplicate", async () => {
@@ -52,6 +129,7 @@ test("the delivered tool-result text is a complete questionnaire with no preview
 	};
 	let queued = 0;
 	const host = createMCPHost({
+		mode: "text",
 		plainTextHook: {
 			available: false,
 			queue: () => {
@@ -76,7 +154,7 @@ test("the delivered tool-result text is a complete questionnaire with no preview
 });
 
 test("formatMCPDeliveredResult wraps the questionnaire without claiming an answer", async () => {
-	const result = await askUser(BASIC, { host: createMCPHost() });
+	const result = await askUser(BASIC, { host: createMCPHost({ mode: "text" }) });
 	const text = formatMCPDeliveredResult(result);
 	assert.match(text, /尚未回答/);
 	assert.match(text, /问题 1\/1：Deploy where\?/);
@@ -143,9 +221,9 @@ test("an elicitation that never resolves still times out (core owns the guarante
 
 test("a bridge with a real output hook gets deferred:true", async () => {
 	const registry = new AppendixRegistry();
-	const host = createMCPHost({ plainTextHook: createPlainTextHook(registry) });
+	const host = createMCPHost({ mode: "text", plainTextHook: createPlainTextHook(registry) });
 	const result = await askUser(BASIC, { host });
-	assert.equal(result.route, "plain_text");
+	assert.equal(result.route, "text");
 	assert.equal(result.status, "deferred");
 	assert.equal(result.deferred, true);
 	assert.equal(registry.hasPending(), true);
@@ -159,7 +237,7 @@ test("createMCPFinalOutputHook appends the questionnaire through a real final-me
 			return () => {};
 		},
 	};
-	const host = createMCPHost({ plainTextHook: createMCPFinalOutputHook(adapter) });
+	const host = createMCPHost({ mode: "text", plainTextHook: createMCPFinalOutputHook(adapter) });
 	const result = await askUser(BASIC, { host });
 	assert.equal(result.status, "deferred");
 	assert.equal(result.deferred, true);

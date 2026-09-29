@@ -2,15 +2,20 @@
  * Public types for AskUserUI.
  *
  * AskUserUI is a host-adaptive "ask the user" interaction primitive. A request
- * can be answered through one of three routes:
+ * is answered through one of three routes:
  *
- *  - `custom`     — a custom terminal UI (only when a host declares `customUI`)
- *  - `native`     — one native input dialog per question (declared `nativeDialogs`)
- *  - `plain_text` — no UI: options are appended to the assistant output as text
+ *  - `custom` — a custom terminal UI (only a real Pi TUI)
+ *  - `native` — one native input dialog per question (`ctx.hasUI` + callable input)
+ *  - `text`   — no UI: options are appended to the assistant output as text
  *
- * Capabilities are declared by a trusted host adapter and are bound to a
- * concrete implementation object, so a capability cannot be declared without
- * something that actually performs it. The model never supplies capabilities.
+ * The route is **forced**, never detected: a trusted host adapter resolves the
+ * UI mode and the core honours exactly that mode. Resolution order is
+ * programmatic `mode` > `PI_ASK_USER_UI_MODE` > default `native`. The model's
+ * tool parameters can never influence it, and an unsupported forced mode is an
+ * actionable error — there is no probing and no silent fallback.
+ *
+ * Capabilities remain bound to a concrete implementation object, so a route
+ * cannot be declared without something that actually performs it.
  */
 
 /** The kind of question. */
@@ -80,28 +85,48 @@ export interface AskUserAnswer {
  * - `answered`  — the user answered through a custom or native UI.
  * - `cancelled` — the user dismissed the interaction (or the caller aborted).
  * - `timeout`   — the shared deadline expired before an answer was given.
- * - `error`     — the renderer or a declared output hook failed; never a fallback.
- * - `deferred`  — no UI, but a final-output hook accepted the questionnaire for
- *                 an append after the model's final answer.
- * - `delivered` — no UI and no output hook: the formatted questionnaire is
- *                 returned in `plainText` for the caller to hand to the user
- *                 directly. This is a normal fallback, not an error; the question
- *                 is still unanswered and the caller replies on the next turn.
+ * - `error`     — the renderer or a declared output hook failed; or the forced
+ *                 mode is invalid (`invalid_config`) or unsupported here
+ *                 (`unsupported_mode`). Never a fallback to another route.
+ * - `deferred`  — the `text` route with a final-output hook that accepted the
+ *                 questionnaire for an append after the model's final answer.
+ * - `delivered` — the `text` route with no output hook: the formatted
+ *                 questionnaire is returned in `plainText` for the caller to hand
+ *                 to the user directly. This is a normal outcome, not an error;
+ *                 the question is still unanswered and the caller replies on the
+ *                 next turn.
  */
 export type AskUserStatus = "answered" | "cancelled" | "timeout" | "error" | "deferred" | "delivered";
-export type AskUserRoute = "custom" | "native" | "plain_text";
+export type AskUserRoute = "custom" | "native" | "text";
+/**
+ * The configured UI route: the same three values as {@link AskUserRoute}.
+ * Configuration never falls back — an unsupported value is an error.
+ */
+export type AskUserUIMode = AskUserRoute;
 export type AskUserErrorCode =
 	| "invalid_request"
 	| "custom_ui_failed"
 	| "native_ui_failed"
 	| "empty_answer"
 	| "no_output_hook"
+	| "invalid_config"
+	| "unsupported_mode"
 	| "internal";
+
+/** An actionable failure: what went wrong and what to do about it. */
+export interface AskUserError {
+	code: AskUserErrorCode;
+	message: string;
+}
 
 /** Result of {@link askUser}. */
 export interface AskUserResult {
 	status: AskUserStatus;
-	/** Which route serviced the request. */
+	/**
+	 * Which route serviced the request. For `invalid_config` no route ran: the
+	 * reported value is `text` and `plainText` is never populated — it is not a
+	 * fallback, the request was refused.
+	 */
 	route: AskUserRoute;
 	answers: AskUserAnswer[];
 	/**
@@ -120,14 +145,19 @@ export interface AskUserResult {
 	cancelledReason?: "user" | "abort";
 	/** Non-fatal normalization notes (e.g. dropped duplicate options). */
 	warnings?: string[];
-	error?: { code: AskUserErrorCode; message: string };
+	error?: AskUserError;
 }
 
 // ---------------------------------------------------------------------------
 // Host adapter contract
 // ---------------------------------------------------------------------------
 
-/** Declared capabilities of a host. Derived from the adapter, never from the model. */
+/**
+ * Structural capabilities of a host: `customUI` is true only when the adapter
+ * binds a callable custom renderer, `nativeDialogs` only when it binds a
+ * callable native runner. They verify that a *forced* mode can really run; they
+ * are never used to pick a route.
+ */
 export interface HostCapabilities {
 	customUI: boolean;
 	nativeDialogs: boolean;
@@ -160,9 +190,9 @@ export interface NativeDialogRunner {
 }
 
 /**
- * Output hook used by the no-UI route. It appends the formatted questionnaire to
- * the assistant output before control returns to the caller. `available` must be
- * false when the host has no working output hook, so callers can fall back to
+ * Output hook used by the `text` route. It appends the formatted questionnaire
+ * to the assistant output before control returns to the caller. `available` must
+ * be false when the host has no working output hook, so callers can fall back to
  * delivering {@link AskUserResult.plainText} themselves.
  */
 export interface PlainTextOutputHook {
@@ -178,6 +208,25 @@ export interface PlainTextOutputHook {
  */
 export interface AskUserHost {
 	name: string;
+	/**
+	 * The route this host is configured to use, already resolved by the trusted
+	 * adapter (programmatic option > `PI_ASK_USER_UI_MODE` > default `native`).
+	 * The core honours it as a forced route unless the call supplies its own
+	 * {@link AskUserOptions.mode}, which overrides it.
+	 */
+	mode?: AskUserUIMode;
+	/**
+	 * Set by the adapter when its own UI configuration is invalid (e.g. an
+	 * unparsable `PI_ASK_USER_UI_MODE`). Without a per-call `mode` the core
+	 * reports it as `status: "error"` with code `invalid_config` instead of
+	 * falling back to another route; a per-call `mode` overrides it.
+	 */
+	configError?: AskUserError;
+	/**
+	 * Bound wherever the implementation can really run, independently of the
+	 * configured {@link mode} — so a per-call mode override has something to
+	 * run. A forced route with no bound implementation is `unsupported_mode`.
+	 */
 	customUI?: CustomUIRenderer;
 	nativeDialogs?: NativeDialogRunner;
 	plainText?: PlainTextOutputHook;
@@ -186,6 +235,15 @@ export interface AskUserHost {
 /** Options for {@link askUser}. */
 export interface AskUserOptions {
 	host: AskUserHost;
+	/**
+	 * Per-call forced UI route — the single highest precedence in the whole
+	 * chain. It overrides the host adapter's configured mode *and* the
+	 * adapter's own `configError` (including an invalid environment value), so
+	 * it only succeeds when the adapter has bound a callable implementation for
+	 * it; otherwise the result is `unsupported_mode`. An invalid value is an
+	 * error (`invalid_config`), never a fallback.
+	 */
+	mode?: AskUserUIMode;
 	signal?: AbortSignal;
 	onUpdate?: (text: string) => void;
 	/** Injectable clock, used by tests. Defaults to `Date.now`. */

@@ -1,12 +1,19 @@
 /**
  * Example: bridge AskUserUI into an MCP server.
  *
- * An MCP host cannot render Pi's TUI, so the bridge declares `customUI: false`
- * by construction (`createMCPHost` never sets it). It declares `nativeDialogs`
- * only when the MCP client supports elicitation.
+ * An MCP host cannot render Pi's TUI, so `createMCPHost` never binds the custom
+ * route (forcing it yields `unsupported_mode`). The route comes only from
+ * trusted configuration — the `mode` parameter below, else the
+ * `PI_ASK_USER_UI_MODE` environment variable, else the default `native`. It is
+ * **never** derived from whether the client declared elicitation: the optional
+ * `elicit` implementation is bound when present, but choosing the route from
+ * its presence would be capability detection. With the default `native` and no
+ * bound elicitation the call fails with `unsupported_mode`; a bridge serving a
+ * generic no-elicitation client is configured with `mode: "text"` explicitly by
+ * its embedder, not by this file.
  *
- * Two normal plain-text outcomes, neither of which claims the question was
- * answered:
+ * Two normal plain-text outcomes of the `text` route, neither of which claims
+ * the question was answered:
  *
  *  - **No final-output hook** (a generic MCP client): `askUser` returns
  *    `status: "delivered"` with the formatted questionnaire in `plainText`, and
@@ -27,6 +34,7 @@ import {
 	createMCPFinalOutputHook,
 	createMCPHost,
 	formatMCPDeliveredResult,
+	type AskUserUIMode,
 	type MCPFinalOutputAdapter,
 } from "../src/index.ts";
 
@@ -47,9 +55,26 @@ interface McpServer {
 	finalOutput?: MCPFinalOutputAdapter;
 }
 
-export function registerAskUserUiTool(server: McpServer): void {
+/** Trusted bridge configuration. Nothing here is derived from the client. */
+export interface RegisterAskUserUiBridgeOptions {
+	/**
+	 * Explicitly configured route: `custom` | `native` | `text`. Trusted
+	 * programmatic configuration — the highest precedence for this bridge.
+	 * When omitted, `PI_ASK_USER_UI_MODE` applies, and otherwise the default
+	 * `native` (which needs a bound elicitation implementation to run).
+	 */
+	mode?: AskUserUIMode;
+	/** Environment source for `PI_ASK_USER_UI_MODE`. Defaults to `process.env`. */
+	env?: Record<string, string | undefined>;
+}
+
+export function registerAskUserUiTool(server: McpServer, options: RegisterAskUserUiBridgeOptions = {}): void {
 	const host = createMCPHost({
+		// Bind the implementation if the client provides one — but never choose
+		// the route from its presence. Route = options.mode > env > native.
 		...(server.elicit ? { elicit: server.elicit.bind(server) } : {}),
+		...(options.mode ? { mode: options.mode } : {}),
+		...(options.env ? { env: options.env } : {}),
 		// The hook is only available when the bridge registered a real transform.
 		...(server.finalOutput ? { plainTextHook: createMCPFinalOutputHook(server.finalOutput) } : {}),
 	});

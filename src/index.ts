@@ -1,10 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { createPiHost, type PiCapabilityDeclaration } from "./adapters/pi.ts";
+import { createPiHost, type PiHostOptions } from "./adapters/pi.ts";
 import { askUserNormalized } from "./core.ts";
+import { UI_MODE_ENV_VAR } from "./mode.ts";
 import { AppendixRegistry, createPlainTextHook, defaultAppendixRegistry, flushAppendix } from "./output.ts";
 import { AskUserUIParams, normalizeAskUserRequest } from "./schema.ts";
-import type { AskUserResult, AskUserRoute, AskUserStatus, NormalizedRequest } from "./types.ts";
+import type { AskUserResult, AskUserRoute, AskUserStatus, AskUserUIMode, NormalizedRequest } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Re-exports: reusable TS surface for other extensions and MCP bridges
@@ -15,8 +16,6 @@ export { askUser, askUserNormalized } from "./core.ts";
 export {
 	createPiHost,
 	createPiCustomRenderer,
-	PI_NATIVE_DIALOG_CAPABILITIES,
-	type PiCapabilityDeclaration,
 	type PiHostOptions,
 } from "./adapters/pi.ts";
 export {
@@ -51,7 +50,16 @@ export {
 	MAX_QUESTIONS,
 	normalizeAskUserRequest,
 } from "./schema.ts";
-export { hostCapabilities, pickRoute } from "./route.ts";
+export { hostCapabilities } from "./route.ts";
+export {
+	DEFAULT_UI_MODE,
+	UI_MODES,
+	UI_MODE_ENV_VAR,
+	isUIMode,
+	normalizeUIMode,
+	resolveUIMode,
+	type ModeResolution,
+} from "./mode.ts";
 export { createDeadline, combineSignals, safeTimeoutMs, MAX_SAFE_TIMEOUT_MS, type LinkedSignal } from "./deadline.ts";
 export {
 	AppendixRegistry,
@@ -89,19 +97,20 @@ export interface AskUserUIDetails {
 }
 
 const DESCRIPTION = [
-	"Ask the user one or more structured questions through the best UI the current host supports.",
+	"Ask the user one or more structured questions through the UI route the host is configured for.",
 	"Up to 5 questions, each with up to 5 options plus an always-available free-text answer.",
-	"Use it when a decision would otherwise require guessing. If no interactive UI is available,",
-	"the questions are appended to your reply as plain text for the user to answer next turn.",
+	"Use it when a decision would otherwise require guessing. The route (custom TUI, native dialogs,",
+	"or plain text) is fixed by host configuration and a `mode` parameter cannot change it.",
 ].join(" ");
 
 const PROMPT_SNIPPET =
-	"Ask the user structured questions (options + free text) when you would otherwise guess; adaptive to custom TUI, native dialogs, or plain text.";
+	"Ask the user structured questions (options + free text) when you would otherwise guess; routed to custom TUI, native dialogs, or plain text by host configuration.";
 
 const PROMPT_GUIDELINES = [
 	"Use AskUserUI when a choice is high-impact or ambiguous and you cannot infer the answer from the codebase.",
 	"Give every option a short label and a one-line description; keep 2-5 options per question.",
 	"Provide a `default` when a question is optional; the user can then skip it.",
+	"Never try to select the UI yourself: a `mode` or `route` parameter is ignored, because the route is fixed by the host.",
 	"If the tool reports no interactive UI, do not answer the question yourself — end your turn so the user can reply.",
 ];
 
@@ -123,9 +132,17 @@ function buildModelContent(result: AskUserResult): string {
 				? "询问被中止（abort），没有得到答案。"
 				: "用户取消了本次询问，没有得到答案。请勿虚构答案。";
 		case "timeout":
-			return "询问超时，用户未在限定时间内回答。请勿虚构答案；可稍后重试或说明你采用的保守默认。";
+			return [
+				"询问超时，用户未在限定时间内回答。",
+				"（若宿主/客户端根本没有响应输入请求，请让使用者把 UI 模式显式设为 text：",
+				`设置环境变量 ${UI_MODE_ENV_VAR}=text，或传入 mode: "text"。）`,
+				"请勿虚构答案；可稍后重试或说明你采用的保守默认。",
+			].join("");
 		case "error":
-			return `询问失败（${result.error?.code ?? "internal"}）：${result.error?.message ?? "未知错误"}`;
+			return [
+				`询问失败（${result.error?.code ?? "internal"}）：${result.error?.message ?? "未知错误"}`,
+				"不要自行回答问卷；向用户说明失败原因，等待人工处理或下一次调用。",
+			].join("");
 		case "deferred":
 			return [
 				"当前环境没有交互 UI，无法即时提问。",
@@ -145,11 +162,15 @@ export interface RegisterAskUserUIOptions {
 	/** Registry used by the plain-text output hook. Defaults to the shared registry. */
 	registry?: AppendixRegistry;
 	/**
-	 * Explicit host capability opt-in (see {@link PiCapabilityDeclaration}).
-	 * Defaults to custom-UI-in-TUI only, no native dialogs — so RPC/ACP use the
-	 * plain-text route unless the embedder declares native dialog support.
+	 * Forced UI route for this registration: `custom` | `native` | `text`. It has
+	 * the highest precedence, above `{@link UI_MODE_ENV_VAR}`. When omitted the
+	 * host adapter resolves the mode (env, else `native`). An invalid value, or a
+	 * forced route the environment cannot run, is an actionable error — never a
+	 * fallback.
 	 */
-	capabilities?: PiCapabilityDeclaration;
+	mode?: AskUserUIMode;
+	/** Environment source for the mode variable. Defaults to `process.env`. */
+	env?: Record<string, string | undefined>;
 }
 
 /**
@@ -161,7 +182,8 @@ export interface RegisterAskUserUIOptions {
  */
 export function registerAskUserUITool(pi: ExtensionAPI, options: RegisterAskUserUIOptions = {}): void {
 	const registry = options.registry ?? defaultAppendixRegistry;
-	const capabilities = options.capabilities;
+	const mode = options.mode;
+	const env = options.env;
 
 	pi.on("message_end", (event) => {
 		const next = flushAppendix(event.message as unknown as { role?: unknown; content?: unknown }, registry);
@@ -197,7 +219,7 @@ export function registerAskUserUITool(pi: ExtensionAPI, options: RegisterAskUser
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				const details: AskUserUIDetails = {
-					route: "plain_text",
+					route: "text",
 					status: "error",
 					answers: [],
 					deferred: false,
@@ -206,13 +228,18 @@ export function registerAskUserUITool(pi: ExtensionAPI, options: RegisterAskUser
 				return { content: [{ type: "text" as const, text: `参数无效：${message}` }], details };
 			}
 
-			const host = createPiHost(ctx, { registry, ...(capabilities ? { capabilities } : {}) });
+			const hostOptions: PiHostOptions = { registry };
+			if (mode !== undefined) hostOptions.mode = mode;
+			if (env !== undefined) hostOptions.env = env;
+			const host = createPiHost(ctx, hostOptions);
+			// Progress updates advertise the forced route actually in use.
+			const progressRoute: AskUserRoute = host.mode ?? "text";
 			const onUpdateText = onUpdate
 				? (text: string) =>
 						onUpdate({
 							content: [{ type: "text" as const, text }],
 							details: {
-								route: "custom",
+								route: progressRoute,
 								status: "answered",
 								answers: [],
 								deferred: false,

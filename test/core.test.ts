@@ -3,8 +3,9 @@ import { getEventListeners } from "node:events";
 import { test } from "node:test";
 import { askUser } from "../src/core.ts";
 import { createDeadline, MAX_SAFE_TIMEOUT_MS } from "../src/deadline.ts";
+import { DEFAULT_UI_MODE } from "../src/mode.ts";
 import { AppendixRegistry, createPlainTextHook, flushAppendix } from "../src/output.ts";
-import type { AskUIInput, AskUserHost, NormalizedRequest } from "../src/types.ts";
+import type { AskUIInput, AskUIOutcome, AskUserHost, NormalizedRequest } from "../src/types.ts";
 
 const BASIC = {
 	questions: [
@@ -15,6 +16,7 @@ const BASIC = {
 function answeredHost(): AskUserHost {
 	return {
 		name: "custom",
+		mode: "custom",
 		customUI: {
 			render: async () => ({
 				kind: "submitted",
@@ -38,17 +40,18 @@ function answeredHost(): AskUserHost {
 	};
 }
 
-test("custom route wins and native is not called", async () => {
+test("a forced custom route is used and native is not called", async () => {
 	const result = await askUser(BASIC, { host: answeredHost() });
 	assert.equal(result.status, "answered");
 	assert.equal(result.route, "custom");
 	assert.deepEqual(result.answers[0]!.selections, ["prod"]);
 });
 
-test("native route is used when only nativeDialogs is declared", async () => {
+test("a forced native route is used when the host binds a native runner", async () => {
 	const result = await askUser(BASIC, {
 		host: {
 			name: "native",
+			mode: "native",
 			nativeDialogs: {
 				run: async () => ({
 					kind: "submitted",
@@ -63,11 +66,137 @@ test("native route is used when only nativeDialogs is declared", async () => {
 	assert.equal(result.route, "native");
 });
 
-test("no declared UI takes the plain-text route and defers to the output hook", async () => {
+test("the default mode is native, even with no host configuration", () => {
+	assert.equal(DEFAULT_UI_MODE, "native");
+});
+
+test("the default native mode on a host with no dialogs is an actionable error, not a fallback", async () => {
 	const registry = new AppendixRegistry();
-		const host: AskUserHost = { name: "plain", plainText: createPlainTextHook(registry) };
+	const host: AskUserHost = { name: "plain", plainText: createPlainTextHook(registry) };
 	const result = await askUser(BASIC, { host });
-	assert.equal(result.route, "plain_text");
+	assert.equal(result.route, "native");
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "unsupported_mode");
+	assert.equal(result.deferred, false);
+	assert.equal(result.plainText, undefined, "an unsupported forced route must not deliver text");
+	assert.match(result.error?.message ?? "", /text/);
+	assert.equal(registry.hasPending(), false);
+});
+
+test("a forced custom route the host cannot render is an actionable error", async () => {
+	const host: AskUserHost = {
+		name: "no-custom",
+		mode: "custom",
+		nativeDialogs: { run: async () => ({ kind: "cancelled" }) },
+	};
+	const result = await askUser(BASIC, { host });
+	assert.equal(result.route, "custom");
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "unsupported_mode");
+	assert.match(result.error?.message ?? "", /TUI/);
+});
+
+test("a forced native route the host cannot run is an actionable error", async () => {
+	const host: AskUserHost = {
+		name: "no-native",
+		mode: "native",
+		customUI: { render: async () => ({ kind: "cancelled" }) },
+	};
+	const result = await askUser(BASIC, { host });
+	assert.equal(result.route, "native");
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "unsupported_mode");
+	assert.match(result.error?.message ?? "", /ctx\.ui\.input/);
+});
+
+test("an invalid programmatic mode is invalid_config, not a fallback", async () => {
+	const result = await askUser(BASIC, {
+		host: answeredHost(),
+		mode: "plain_text" as never,
+	});
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "invalid_config");
+	assert.equal(result.route, "text");
+	assert.equal(result.plainText, undefined);
+	assert.match(result.error?.message ?? "", /custom \| native \| text/);
+});
+
+test("a host whose own configuration is invalid reports invalid_config", async () => {
+	const host: AskUserHost = {
+		name: "pi",
+		configError: { code: "invalid_config", message: "PI_ASK_USER_UI_MODE 的值无效：\"nope\"" },
+		customUI: { render: async () => ({ kind: "cancelled" }) },
+	};
+	const result = await askUser(BASIC, { host });
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "invalid_config");
+	assert.match(result.error?.message ?? "", /PI_ASK_USER_UI_MODE/);
+});
+
+test("the programmatic mode overrides the host's own resolved mode", async () => {
+	const host: AskUserHost = { name: "plain", mode: "custom", plainText: createPlainTextHook(new AppendixRegistry()) };
+	const result = await askUser(BASIC, { host, mode: "text" });
+	assert.equal(result.route, "text");
+	assert.equal(result.status, "deferred");
+});
+
+const SUBMITTED: AskUIOutcome = {
+	kind: "submitted",
+	answers: [
+		{ index: 0, id: "q1", title: "Deploy where?", kind: "single", selections: ["prod"], usedDefault: false },
+	],
+};
+
+test("the per-call override uses implementations bound independently of the configured route", async () => {
+	// Like createPiHost in TUI mode: configured for text, but both interactive
+	// implementations are bound wherever they can really run.
+	const host: AskUserHost = {
+		name: "pi",
+		mode: "text",
+		customUI: { render: async () => SUBMITTED },
+		nativeDialogs: { run: async () => ({ kind: "cancelled" }) },
+	};
+	const result = await askUser(BASIC, { host, mode: "custom" });
+	assert.equal(result.route, "custom");
+	assert.equal(result.status, "answered");
+	assert.deepEqual(result.answers[0]!.selections, ["prod"]);
+});
+
+test("the per-call override beats an invalid adapter configuration", async () => {
+	// e.g. an unparsable PI_ASK_USER_UI_MODE: without a per-call mode this is
+	// invalid_config; with one, the caller's explicit choice is honoured.
+	const host: AskUserHost = {
+		name: "pi",
+		configError: { code: "invalid_config", message: "PI_ASK_USER_UI_MODE 的值无效：\"nope\"" },
+		nativeDialogs: { run: async () => SUBMITTED },
+	};
+	const overridden = await askUser(BASIC, { host, mode: "native" });
+	assert.equal(overridden.route, "native");
+	assert.equal(overridden.status, "answered");
+
+	const withoutOverride = await askUser(BASIC, { host });
+	assert.equal(withoutOverride.status, "error");
+	assert.equal(withoutOverride.error?.code, "invalid_config");
+});
+
+test("the per-call override is strict: a missing implementation is unsupported_mode", async () => {
+	const host: AskUserHost = {
+		name: "pi",
+		mode: "text",
+		nativeDialogs: { run: async () => ({ kind: "cancelled" }) },
+	};
+	const result = await askUser(BASIC, { host, mode: "custom" });
+	assert.equal(result.route, "custom");
+	assert.equal(result.status, "error");
+	assert.equal(result.error?.code, "unsupported_mode");
+	assert.equal(result.plainText, undefined);
+});
+
+test("the text route defers to the output hook", async () => {
+	const registry = new AppendixRegistry();
+	const host: AskUserHost = { name: "plain", mode: "text", plainText: createPlainTextHook(registry) };
+	const result = await askUser(BASIC, { host });
+	assert.equal(result.route, "text");
 	assert.equal(result.status, "deferred");
 	assert.equal(result.deferred, true);
 	assert.ok(result.plainText && result.plainText.includes("自由输入"));
@@ -81,18 +210,19 @@ test("no declared UI takes the plain-text route and defers to the output hook", 
 	assert.equal(registry.hasPending(), false);
 });
 
-test("plain text with no output hook is delivered inline as a normal fallback, not an error", async () => {
-	const result = await askUser(BASIC, { host: { name: "nohook" } });
-	assert.equal(result.route, "plain_text");
+test("text with no output hook is delivered inline as a normal outcome, not an error", async () => {
+	const result = await askUser(BASIC, { host: { name: "nohook", mode: "text" } });
+	assert.equal(result.route, "text");
 	assert.equal(result.status, "delivered");
 	assert.equal(result.deferred, false);
-	assert.equal(result.error, undefined, "a missing hook is a normal fallback, not an error");
+	assert.equal(result.error, undefined, "a missing hook is a normal outcome, not an error");
 	assert.ok(result.plainText && result.plainText.includes("自由输入"));
 });
 
 test("a declared output hook that throws is a genuine error, not a fallback", async () => {
 	const host: AskUserHost = {
 		name: "broken",
+		mode: "text",
 		plainText: {
 			available: true,
 			queue: () => {
@@ -110,6 +240,7 @@ test("cancel, timeout, and error are distinguished and never degrade", async () 
 	let nativeCalled = false;
 	const base: AskUserHost = {
 		name: "custom",
+		mode: "custom",
 		customUI: { render: async () => ({ kind: "cancelled" }) },
 		nativeDialogs: {
 			run: async () => {
@@ -124,13 +255,15 @@ test("cancel, timeout, and error are distinguished and never degrade", async () 
 	assert.equal(nativeCalled, false);
 
 	const timeout = await askUser(BASIC, {
-		host: { name: "custom", customUI: { render: async () => ({ kind: "timeout" }) } },
+		host: { name: "custom", mode: "custom", customUI: { render: async () => ({ kind: "timeout" }) } },
 	});
 	assert.equal(timeout.status, "timeout");
+	assert.equal(timeout.route, "custom");
 
 	const errored = await askUser(BASIC, {
 		host: {
 			name: "custom",
+			mode: "custom",
 			customUI: {
 				render: async () => {
 					throw new Error("boom");
@@ -153,6 +286,7 @@ test("the shared deadline aborts and yields a timeout, not a fallback", async ()
 	let observedTotal = 0;
 	const host: AskUserHost = {
 		name: "custom",
+		mode: "custom",
 		customUI: {
 			render: (input: AskUIInput) =>
 				new Promise((resolve) => {
@@ -181,6 +315,7 @@ test("a caller abort is reported as cancelled/abort", async () => {
 	const controller = new AbortController();
 	const host: AskUserHost = {
 		name: "custom",
+		mode: "custom",
 		customUI: {
 			render: (input) =>
 				new Promise((resolve) => {
@@ -201,6 +336,7 @@ test("a renderer that never resolves still yields a timeout (core owns the guara
 	let nativeCalled = false;
 	const host: AskUserHost = {
 		name: "custom",
+		mode: "custom",
 		// Ignores its AbortSignal entirely.
 		customUI: { render: () => new Promise<never>(() => {}) },
 		nativeDialogs: {
@@ -225,6 +361,7 @@ test("a renderer that never resolves still yields a timeout (core owns the guara
 test("a caller abort returns promptly even when the renderer ignores signals", async () => {
 	const host: AskUserHost = {
 		name: "custom",
+		mode: "custom",
 		customUI: { render: () => new Promise<never>(() => {}) },
 	};
 	const controller = new AbortController();
@@ -241,7 +378,7 @@ test("a caller abort returns promptly even when the renderer ignores signals", a
 test("a native runner that never resolves also times out without degrading", async () => {
 	const result = await askUser(
 		{ questions: [{ title: "A" }], timeoutPerQuestionMs: 40 },
-		{ host: { name: "native", nativeDialogs: { run: () => new Promise<never>(() => {}) } } },
+		{ host: { name: "native", mode: "native", nativeDialogs: { run: () => new Promise<never>(() => {}) } } },
 	);
 	assert.equal(result.status, "timeout");
 	assert.equal(result.route, "native");
@@ -249,7 +386,7 @@ test("a native runner that never resolves also times out without degrading", asy
 
 test("an already-aborted call never queues a plain-text questionnaire", async () => {
 	const registry = new AppendixRegistry();
-	const host: AskUserHost = { name: "plain", plainText: createPlainTextHook(registry) };
+	const host: AskUserHost = { name: "plain", mode: "text", plainText: createPlainTextHook(registry) };
 	const controller = new AbortController();
 	controller.abort();
 	const result = await askUser(BASIC, { host, signal: controller.signal });
@@ -262,6 +399,7 @@ test("an already-aborted call never renders an interactive UI", async () => {
 	let rendered = false;
 	const host: AskUserHost = {
 		name: "custom",
+		mode: "custom",
 		customUI: {
 			render: async () => {
 				rendered = true;
@@ -277,7 +415,11 @@ test("an already-aborted call never renders an interactive UI", async () => {
 });
 
 test("the abort listener installed on the caller signal is always removed", async () => {
-	const host: AskUserHost = { name: "custom", customUI: { render: async () => ({ kind: "cancelled" }) } };
+	const host: AskUserHost = {
+		name: "custom",
+		mode: "custom",
+		customUI: { render: async () => ({ kind: "cancelled" }) },
+	};
 	const controller = new AbortController();
 	for (let index = 0; index < 5; index += 1) {
 		await askUser(BASIC, { host, signal: controller.signal });
@@ -290,14 +432,22 @@ test("the abort listener installed on the caller signal is always removed", asyn
 });
 
 test("a timeout-path call also removes the caller listener", async () => {
-	const host: AskUserHost = { name: "custom", customUI: { render: () => new Promise<never>(() => {}) } };
+	const host: AskUserHost = {
+		name: "custom",
+		mode: "custom",
+		customUI: { render: () => new Promise<never>(() => {}) },
+	};
 	const controller = new AbortController();
 	await askUser({ questions: [{ title: "A" }], timeoutPerQuestionMs: 30 }, { host, signal: controller.signal });
 	assert.equal(getEventListeners(controller.signal, "abort").length, 0);
 });
 
 test("an oversized timeout is clamped instead of firing immediately", async () => {
-	const host: AskUserHost = { name: "custom", customUI: { render: async () => ({ kind: "cancelled" }) } };
+	const host: AskUserHost = {
+		name: "custom",
+		mode: "custom",
+		customUI: { render: async () => ({ kind: "cancelled" }) },
+	};
 	const result = await askUser(
 		{ questions: [{ title: "A" }], timeoutPerQuestionMs: Number.MAX_SAFE_INTEGER },
 		{ host },
@@ -323,6 +473,7 @@ test("empty submitted answers are rejected as empty_answer", async () => {
 	const result = await askUser(BASIC, {
 		host: {
 			name: "custom",
+			mode: "custom",
 			customUI: {
 				render: async () => ({
 					kind: "submitted",

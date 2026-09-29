@@ -1,4 +1,5 @@
 import { draftFromDefault, toAnswer } from "../answers.ts";
+import { UI_MODE_ENV_VAR, resolveUIMode } from "../mode.ts";
 import { nativeInputHint, parseNativeAnswer } from "../parse.ts";
 import { AskUserUIParams } from "../schema.ts";
 import {
@@ -13,6 +14,7 @@ import type {
 	AskUserAnswer,
 	AskUserHost,
 	AskUserResult,
+	AskUserUIMode,
 	NativeDialogRunner,
 	NormalizedQuestion,
 	PlainTextOutputHook,
@@ -21,13 +23,18 @@ import type {
 /**
  * MCP bridge contract.
  *
- * An MCP host cannot render Pi's TUI, so a bridge must never declare `customUI`.
- * Its only real options are:
- *  - `nativeDialogs`: when the MCP client supports elicitation, map one question
- *    per elicitation request (same parsing/validation as the Pi native route).
- *  - plain text: otherwise return the formatted questionnaire **directly in the
- *    tool result**. This is the normal fallback — not an error. `askUser` reports
- *    `status: "delivered"`, `deferred: false`, with `plainText` populated.
+ * An MCP host cannot render Pi's TUI, so `customUI` is never bound (forcing
+ * `custom` is `unsupported_mode`). The two runnable routes are:
+ *  - `native`: one question per elicitation request (same parsing/validation as
+ *    the Pi native route). Requires a client that supports elicitation; this is
+ *    the unconfigured **default** mode, like every other adapter.
+ *  - `text`: return the formatted questionnaire **directly in the tool result**.
+ *    This is the normal outcome of the route — not an error. `askUser` reports
+ *    `status: "delivered"`, `deferred: false`, with `plainText` populated. A
+ *    bridge serving a client without elicitation must opt in explicitly with
+ *    `createMCPHost({ mode: "text" })`; with the default `native` and no
+ *    elicitation the call fails with `unsupported_mode` instead of silently
+ *    downgrading.
  *
  * A generic MCP client has no final-response hook, so the questionnaire cannot be
  * appended after the assistant's final answer from here. That is fine: the bridge
@@ -58,18 +65,46 @@ export type MCPElicitFn = (request: {
 export interface MCPHostOptions {
 	/** Adapter name used in diagnostics. Defaults to `mcp`. */
 	name?: string;
-	/** Elicitation call. Its presence is what declares the `nativeDialogs` capability. */
+	/** Elicitation call. Its presence is what makes the `native` route runnable. */
 	elicit?: MCPElicitFn;
 	/** Output hook. Defaults to an unavailable hook so the bridge must deliver `plainText`. */
 	plainTextHook?: PlainTextOutputHook;
+	/**
+	 * Forced route: `custom` | `native` | `text`. Programmatic, highest
+	 * precedence — it overrides {@link UI_MODE_ENV_VAR}. Invalid values are
+	 * recorded as `configError`, never silently replaced.
+	 */
+	mode?: AskUserUIMode;
+	/**
+	 * Environment source for the mode variable, read only by this trusted
+	 * adapter. Defaults to `process.env`; tests can inject a value.
+	 */
+	env?: Record<string, string | undefined>;
 }
 
-/** Create an AskUserUI host adapter for an MCP bridge. */
+/**
+ * Create an AskUserUI host adapter for an MCP bridge.
+ *
+ * The default mode is `native` — the same unconfigured default as every other
+ * adapter, with no capability inference and no silent fallback. A bridge whose
+ * client does not support elicitation therefore fails with `unsupported_mode`
+ * until it explicitly opts into `createMCPHost({ mode: "text" })`. The native
+ * runner is bound whenever an elicitation call is supplied, independently of
+ * the selected route, so a per-call `askUser(request, { host, mode })` override
+ * has something to run.
+ */
 export function createMCPHost(options: MCPHostOptions = {}): AskUserHost {
+	const env = options.env ?? process.env;
 	const host: AskUserHost = {
 		name: options.name ?? "mcp",
 		plainText: options.plainTextHook ?? createUnavailablePlainTextHook(),
 	};
+	const resolved = resolveUIMode(options.mode, env[UI_MODE_ENV_VAR]);
+	if (!resolved.ok) {
+		host.configError = { code: "invalid_config", message: resolved.message };
+		return host;
+	}
+	host.mode = resolved.mode;
 	if (options.elicit) {
 		host.nativeDialogs = createMCPNativeRunner(options.elicit);
 	}
@@ -197,10 +232,10 @@ export const MCP_DELIVERED_PREAMBLE = "请在下一条消息中回答以下问�
 /**
  * Compose the MCP tool-result text for a `delivered` (no output hook) result.
  *
- * The questionnaire goes straight into the tool result — the normal MCP fallback
- * — and the model/user is told it is **not yet answered** and to reply with an
- * ordinary message on the next turn. It is never described as answered, and it
- * is not queued anywhere, so it cannot be appended twice.
+ * The questionnaire goes straight into the tool result — the normal outcome of
+ * the `text` route — and the model/user is told it is **not yet answered** and
+ * to reply with an ordinary message on the next turn. It is never described as
+ * answered, and it is not queued anywhere, so it cannot be appended twice.
  */
 export function formatMCPDeliveredResult(result: AskUserResult): string {
 	return `${MCP_DELIVERED_PREAMBLE}\n\n${result.plainText ?? ""}`;
@@ -213,10 +248,10 @@ export const ASKUSERUI_MCP_INPUT_SCHEMA = AskUserUIParams;
 export const ASKUSERUI_MCP_CONTRACT = {
 	toolName: "AskUserUI",
 	inputSchema: ASKUSERUI_MCP_INPUT_SCHEMA,
-	/** MCP cannot render Pi's TUI; a bridge must not declare customUI. */
+	/** MCP cannot render Pi's TUI: forcing the `custom` route is `unsupported_mode`. */
 	customUI: false as const,
-	/** Native dialogs are available only through client elicitation. */
+	/** The `native` route is runnable only through client elicitation. */
 	nativeDialogs: "requires client elicitation support",
 	plainText:
-		"Normal fallback: the bridge returns the formatted questionnaire directly in the tool result (status `delivered`, deferred:false). The question is unanswered; the user replies with an ordinary message on the next turn. With a real final-message hook the bridge gets status `deferred` (deferred:true) and the questionnaire is appended after the assistant's final answer instead.",
+		"Normal outcome of the `text` route: the bridge returns the formatted questionnaire directly in the tool result (status `delivered`, deferred:false). The question is unanswered; the user replies with an ordinary message on the next turn. With a real final-message hook the bridge gets status `deferred` (deferred:true) and the questionnaire is appended after the assistant's final answer instead.",
 } as const;
