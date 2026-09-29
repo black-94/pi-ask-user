@@ -45,7 +45,7 @@ const QuestionSchema = Type.Object({
 });
 
 /**
- * Parameter schema registered for the `AskUser` tool, and the single input
+ * Parameter schema registered for the `ask_user` tool, and the single input
  * contract for direct `askUser` calls too. Only these fields and types are read;
  * anything else is rejected as `invalid_request` rather than coerced.
  *

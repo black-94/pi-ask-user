@@ -27,6 +27,9 @@
 /** The kind of question. */
 export type QuestionKind = "single" | "multi" | "input";
 
+/** Custom-UI presentation: floating overlay or inline prompt area. */
+export type AskUserDisplayMode = "overlay" | "inline";
+
 /** One selectable option. `preview` is rendered only by the custom UI. */
 export interface AskUserOption {
 	/** Short label shown in the list and returned as the answer value. */
@@ -63,7 +66,7 @@ export interface AskUserRequest {
 	/** Optional heading shown above the questionnaire. */
 	header?: string;
 	/** Custom-UI presentation. Defaults to `overlay`. */
-	displayMode?: "overlay" | "inline";
+	displayMode?: AskUserDisplayMode;
 	/**
 	 * Base timeout per question in milliseconds. Defaults to 60000.
 	 *
@@ -253,10 +256,46 @@ export interface AskUserHost {
 	 * re-selects a route per request.
 	 */
 	support: AskUserSupport;
+	/**
+	 * User-configured UI preferences, resolved once at host creation from the
+	 * explicit options over the user config file. Absent means "nothing
+	 * configured": the request's own `displayMode`/`timeoutPerQuestionMs` then
+	 * applies over the built-in defaults.
+	 */
+	preferences?: AskUserUiPreferences;
 	/** Bound wherever the custom route can really run. */
 	customUI?: CustomUIRenderer;
 	/** Bound wherever the native route can really run. */
 	nativeDialogs?: NativeDialogRunner;
+}
+
+/**
+ * Resolved user presentation preferences (explicit option > config file).
+ *
+ * Every field is optional so the core can distinguish "the user configured
+ * this" from "fall back to the request, then the built-in default":
+ *
+ *  - `displayMode` set  → wins over the request's `displayMode`;
+ *  - `overlayToggleKey` set to `null` → the overlay toggle is disabled;
+ *    absent → the built-in `alt+o` applies;
+ *  - `timeoutPerQuestionMs` set → wins over the request's value.
+ */
+export interface AskUserUiPreferences {
+	displayMode?: AskUserDisplayMode;
+	overlayToggleKey?: string | null;
+	timeoutPerQuestionMs?: number;
+}
+
+/**
+ * Observer of the interactive wait, used for runtime events. `waitStarted` is
+ * called only when a route is actually about to render; `waitEnded` is called
+ * exactly once afterwards for every outcome (answered/aborted/timeout/error).
+ * A request that never enters the UI (invalid, refused, already aborted) emits
+ * neither. Implementations must never throw.
+ */
+export interface AskUserEventSink {
+	waitStarted(): void;
+	waitEnded(result: AskUserResult): void;
 }
 
 /** Options for {@link askUser}. */
@@ -266,6 +305,11 @@ export interface AskUserOptions {
 	onUpdate?: (text: string) => void;
 	/** Injectable clock, used by tests. Defaults to `Date.now`. */
 	now?: () => number;
+	/**
+	 * Optional event observer for the interactive wait. The tool supplies a
+	 * Pi event-bus-backed sink; a direct caller may supply its own (or none).
+	 */
+	events?: AskUserEventSink;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +330,7 @@ export interface NormalizedQuestion {
 export interface NormalizedRequest {
 	header?: string;
 	questions: NormalizedQuestion[];
-	displayMode: "overlay" | "inline";
+	displayMode: AskUserDisplayMode;
 	timeoutPerQuestionMs: number;
 	totalTimeoutMs: number;
 }

@@ -4,7 +4,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import { createDeadline } from "../src/deadline.ts";
 import { normalizeAskUserRequest } from "../src/schema.ts";
-import { AskUserComponent, SPLIT_MIN_WIDTH, type AskUserTheme, type CustomUIResult } from "../src/ui/custom.ts";
+import { AskUserComponent, MIN_OVERLAY_ROWS, SPLIT_MIN_WIDTH, type AskUserTheme, type CustomUIResult } from "../src/ui/custom.ts";
 import type { NormalizedRequest } from "../src/types.ts";
 
 const theme: AskUserTheme = {
@@ -59,6 +59,20 @@ function assertFits(lines: string[], width: number) {
 		assert.ok(visibleWidth(line) <= width, `line exceeds width ${width}: ${JSON.stringify(line)}`);
 	}
 }
+
+test("the dialog is framed and padded without exceeding its viewport", () => {
+	const req = request({
+		questions: [{ title: "Choose", prompt: "Pick one", kind: "single", options: [{ label: "Alpha" }, { label: "Beta" }] }],
+	});
+	const { component } = mount(req);
+	const lines = component.render(96);
+	assertFits(lines, 96);
+	assert.match(lines[0]!, /^╭─ ask_user /);
+	assert.match(lines.at(-1)!, /^╰─+╯$/);
+	assert.ok(lines.slice(1, -1).every((line) => line.startsWith("│ ") && line.endsWith(" │")));
+	assert.ok(lines.some((line) => line.includes("│ ") && line.includes("Pick one")));
+	component.dispose();
+});
 
 test("wide terminals render the option preview in a right column", () => {
 	const req = request({
@@ -127,6 +141,20 @@ test("single-select: Enter selects and submits", () => {
 	assert.deepEqual(result!.answers![0]!.selections, ["prod"]);
 });
 
+test("single-select: Space replaces the previous choice and never creates multiple selections", () => {
+	const req = request({
+		questions: [{ title: "Choose", kind: "single", options: [{ label: "Alpha" }, { label: "Beta" }] }],
+	});
+	const { component, getResult } = mount(req);
+	component.handleInput(KEYS.space);
+	component.handleInput(KEYS.down);
+	component.handleInput(KEYS.space);
+	component.handleInput(KEYS.space); // choosing again does not deselect it
+	assert.match(component.render(96).join("\n"), /◉ 2\. Beta/);
+	component.handleInput(KEYS.ctrlEnter);
+	assert.deepEqual(getResult()?.answers?.[0]?.selections, ["Beta"]);
+});
+
 test("multi-select: selection and free text submit together", () => {
 	const req = request({
 		questions: [{ title: "Scope", kind: "multi", options: [{ label: "unit" }, { label: "integration" }] }],
@@ -179,6 +207,90 @@ test("a question with a default can be skipped with `s`", () => {
 	assert.equal(result!.answers![0]!.usedDefault, true);
 });
 
+test("overlay tabs precede the current question and display the questionnaire header", () => {
+	const req = request({
+		header: "Test questionnaire",
+		questions: [
+			{ title: "First", kind: "single", options: [{ label: "a" }] },
+			{ title: "Second", kind: "input" },
+		],
+	});
+	const { component } = mount(req);
+	const lines = component.render(96);
+	assert.match(lines[0]!, /^╭─ Test questionnaire \d+:\d{2} ─+╮$/);
+	assert.equal(lines.filter((line) => line.includes("Test questionnaire")).length, 1);
+	assert.ok(lines.findIndex((line) => line.includes("Submit")) < lines.findIndex((line) => line.includes("1/2. First")));
+	component.dispose();
+});
+
+test("inline multi-question header takes the frame label without duplicating a content row", () => {
+	const { component } = mount(request({
+		header: "多问题 Inline 样式测试",
+		displayMode: "inline",
+		questions: [{ title: "First", kind: "input" }, { title: "Second", kind: "input" }],
+	}));
+	const lines = component.render(96);
+	assert.match(lines[0]!, /^╭─ 多问题 Inline 样式测试 \d+:\d{2} ─+╮$/);
+	assert.equal(lines.filter((line) => line.includes("多问题 Inline 样式测试")).length, 1);
+	assertFits(lines, 96);
+	assertFits(component.render(16), 16);
+	component.dispose();
+});
+
+test("countdown sits beside the header and refreshes without user input", async () => {
+	let now = 0;
+	let renders = 0;
+	const component = new AskUserComponent({
+		request: request({ header: "Time left", questions: [{ title: "Q", kind: "input" }] }),
+		deadline: createDeadline(65_000, () => now),
+		theme,
+		tui: { requestRender: () => { renders += 1; }, terminal: { rows: 24 } },
+		done: () => {},
+	});
+	try {
+		assert.match(component.render(80)[0]!, /^╭─ Time left 1:05 ─+╮$/);
+		now = 5_001;
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		assert.ok(renders > 0, "the countdown should request a render without keyboard input");
+		assert.match(component.render(80)[0]!, /^╭─ Time left 1:00 ─+╮$/);
+		assertFits(component.render(16), 16);
+	} finally {
+		component.dispose();
+	}
+	const afterDispose = renders;
+	now += 1_000;
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	assert.equal(renders, afterDispose, "disposed countdown must stop rendering");
+});
+
+test("short overlay groups the free-text input with its options instead of padding between them", () => {
+	const { component } = mount(request({
+		questions: [{ title: "Choose", kind: "single", options: [{ label: "Alpha" }, { label: "Beta" }] }],
+	}));
+	const lines = component.render(96);
+	const lastOption = lines.findIndex((line) => line.includes("2. Beta"));
+	assert.ok(lastOption >= 0);
+	assert.match(lines[lastOption + 1]!, /›.*Optional: add a note/);
+	assert.equal(lines.length, MIN_OVERLAY_ROWS);
+	assert.match(lines.at(-2)!, /Tab switch.*Esc cancel/);
+	assert.ok(lines.slice(lastOption + 2, -2).some((line) => line.replace(/[│ ]/g, "") === ""), "expected padding between input and bottom hint");
+	component.dispose();
+});
+
+test("a short overlay has a minimum height, while inline stays compact and small screens stay bounded", () => {
+	for (const rows of [24, 12, 5]) {
+		const { component } = mount(request({ questions: [{ title: "Q", kind: "input" }] }), 10_000, rows);
+		const lines = component.render(96);
+		const budget = rows < 7 ? rows : Math.min(Math.floor(rows * 0.85), rows - 2);
+		assert.equal(lines.length, Math.min(MIN_OVERLAY_ROWS, budget));
+		assert.match(lines.join("\n"), /›/);
+		component.dispose();
+	}
+	const { component } = mount(request({ questions: [{ title: "Q", kind: "input" }], displayMode: "inline" }));
+	assert.ok(component.render(96).length < MIN_OVERLAY_ROWS);
+	component.dispose();
+});
+
 test("multiple questions: tabs reach a review tab before submitting", () => {
 	const req = request({
 		questions: [
@@ -200,6 +312,36 @@ test("multiple questions: tabs reach a review tab before submitting", () => {
 		result!.answers!.map((answer) => answer.selections[0]),
 		["a", "c"],
 	);
+});
+
+test("inline review uses Down to focus Submit while Tab still switches questions", () => {
+	const req = request({
+		displayMode: "inline",
+		questions: [
+			{ title: "First", kind: "input" },
+			{ title: "Second", kind: "input" },
+		],
+	});
+	const { component, getResult } = mount(req);
+	component.handleInput("one");
+	component.handleInput(KEYS.enter);
+	component.handleInput("two");
+	component.handleInput(KEYS.enter);
+	assert.match(component.render(100).join("\n"), /  \[ Enter Submit \]/);
+	component.handleInput(KEYS.tab); // Submit tab wraps to First, not the button
+	assert.match(component.render(100).join("\n"), /1\/2\. First/);
+	component.handleInput(KEYS.shiftTab); // First returns to Submit
+	assert.match(component.render(100).join("\n"), /Review before submitting/);
+	component.handleInput(KEYS.down);
+	assert.match(component.render(100).join("\n"), /▸ \[ Enter Submit \]/);
+	component.handleInput(KEYS.tab); // even while focused, Tab switches tabs
+	assert.match(component.render(100).join("\n"), /1\/2\. First/);
+	component.handleInput(KEYS.shiftTab);
+	assert.match(component.render(100).join("\n"), /  \[ Enter Submit \]/);
+	component.handleInput(KEYS.down);
+	component.handleInput(KEYS.enter);
+	assert.equal(getResult()?.kind, "submitted");
+	assert.deepEqual(getResult()?.answers?.map((answer) => answer.freeText), ["one", "two"]);
 });
 
 test("review blocks submission while a question is unanswered", () => {
@@ -266,6 +408,33 @@ test("a focused free-input row emits the IME cursor marker", () => {
 	// Losing focus re-renders without the marker.
 	component.focused = false;
 	assert.ok(!component.render(80).join("").includes(CURSOR_MARKER));
+});
+
+test("inactive input has no highlighted cursor and placeholders are muted", () => {
+	const styledTheme: AskUserTheme = {
+		fg: (color, text) => color === "muted" ? `\x1b[90m${text}\x1b[39m` : text,
+		bold: (text) => text,
+	};
+	const component = new AskUserComponent({
+		request: request({ questions: [{ title: "Choose", kind: "single", options: [{ label: "Alpha" }] }] }),
+		deadline: createDeadline(10_000),
+		theme: styledTheme,
+		tui: { requestRender: () => {}, terminal: { rows: 12 } },
+		done: () => {},
+	});
+	component.focused = true;
+	const inputLine = () => component.render(80).find((line) => line.replace(/\x1b\[[0-9;]*m/g, "").includes("Optional: add a note"))!;
+	assert.match(inputLine(), /\x1b\[90mO\x1b\[39m\x1b\[90mptional: add a note\x1b\[39m/);
+	assert.ok(!inputLine().includes("\x1b[7m"), "an inactive placeholder should have no fake cursor");
+	component.handleInput(KEYS.down); // activate the input row
+	assert.ok(inputLine().includes("\x1b[7m"), "the active input should show its cursor");
+	component.handleInput("typed");
+	const typedLine = component.render(80).find((line) => line.includes("typed"))!;
+	assert.ok(!typedLine.includes("\x1b[90m"), "typed text should not use the placeholder color");
+	component.handleInput(KEYS.up); // leave the typed input
+	const inactiveLine = component.render(80).find((line) => line.includes("typed"))!;
+	assert.ok(!inactiveLine.includes("\x1b[7m"), "an inactive typed input should have no fake cursor");
+	component.dispose();
 });
 
 test("Up from the free-input row returns to the options", () => {
@@ -557,4 +726,30 @@ test("ANSI-styled themes still measure width correctly", () => {
 		assertFits(lines, width);
 	}
 	assert.ok(component.render(120).join("\n").includes("\x1b["));
+});
+
+test("narrow grid: 20/40/80 cols by 8/12/24 rows never overflows and keeps the input reachable", () => {
+	const req = request(FIVE_LONG);
+	for (const width of [20, 40, 80]) {
+		for (const rows of [8, 12, 24]) {
+			const { component } = mount(req, 10_000, rows);
+			const lines = component.render(width);
+			assert.ok(lines.length <= rows, `${width}x${rows}: height ${lines.length} exceeds rows`);
+			assertFits(lines, width);
+			assert.match(lines.join("\n"), /›/, `${width}x${rows}: the free-input row must be reachable`);
+			component.dispose();
+		}
+	}
+});
+
+test("the IME cursor marker survives narrow widths and short rows", () => {
+	const req = request({ questions: [{ title: "Notes", kind: "input" }] });
+	const { component } = mount(req, 10_000, 8);
+	component.focused = true;
+	for (const width of [20, 40, 80]) {
+		const lines = component.render(width);
+		assertFits(lines, width);
+		assert.ok(lines.join("").includes(CURSOR_MARKER), `width ${width}: the focused input must emit the marker`);
+	}
+	component.dispose();
 });

@@ -1,10 +1,10 @@
 # pi-ask-user
 
-`AskUser` — a route-resolved "ask the user" interaction for Pi.
+`ask_user` — a route-resolved "ask the user" interaction for Pi.
 
 Two entry points share one strict questionnaire contract and one route resolution:
 
-- the registered model-facing tool **`AskUser`**;
+- the registered model-facing tool **`ask_user`**;
 - the host-bound TypeScript API **`createAskUser(ctx)`**, for other extensions.
 
 A questionnaire is answered through one of two routes, resolved once when the host
@@ -31,7 +31,7 @@ Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`,
 
 ## Tool parameters
 
-The registered tool name is exactly **`AskUser`**.
+The registered tool name is exactly **`ask_user`**.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -43,8 +43,8 @@ The registered tool name is exactly **`AskUser`**.
 | `questions[].default` | `string?` | makes the question skippable |
 | `questions[].id` | `string?` | non-empty; generated as `q1`, `q2`, … when omitted |
 | `header` | `string?` | heading above the questionnaire |
-| `displayMode` | `"overlay" \| "inline"?` | custom route only; default `overlay` |
-| `timeoutPerQuestionMs` | `number?` | base timeout per question; default `60000` |
+| `displayMode` | `"overlay" \| "inline"?` | custom route only; default `overlay`; a user-configured preference overrides it |
+| `timeoutPerQuestionMs` | `number?` | base timeout per question; default `60000`; a user-configured preference overrides it |
 
 These fields are the whole input contract, for the tool and for direct calls
 alike. Unknown fields, wrong types, empty ids, and over-long values are rejected
@@ -67,6 +67,79 @@ then dropped. Duplicate option labels are de-duplicated and reported in
   ]
 }
 ```
+
+## User config file
+
+There are **no environment variables**. User preferences live in a documented
+JSON file:
+
+```
+~/.pi/ask-user/config.json
+```
+
+No file — or an empty/whitespace-only file — means the built-in defaults. The
+knobs are:
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `mode` | `"custom" \| "native"` | omitted ⇒ probe | force the UI route |
+| `displayMode` | `"overlay" \| "inline"` | `overlay` | custom-UI presentation |
+| `overlayToggleKey` | KeyId chord, or `null`/`"off"`/`"none"`/`"disabled"` | `alt+o` | overlay show/hide key; the disable values turn it off |
+| `timeoutPerQuestionMs` | non-negative number | `60000` | base timeout per question |
+
+```json
+{
+  "mode": "custom",
+  "displayMode": "overlay",
+  "overlayToggleKey": "alt+o",
+  "timeoutPerQuestionMs": 60000
+}
+```
+
+Validation is strict and actionable. Invalid JSON, an unknown key, a wrong type,
+or an out-of-range value is reported as `invalid_config` naming the file and the
+offending field — never ignored, coerced, or fallen back from. A bad config
+makes the host unusable: every `ask_user` call is refused with the actionable
+reason, and the model is told to ask in ordinary text instead.
+
+`overlayToggleKey` is validated against the supported **KeyId** grammar and
+against the questionnaire's own controls. A malformed spec (`alt+banana`), a
+reserved key (`escape`/`esc` — which must keep cancelling — plus
+`enter`/`tab`/arrows/`space`/`pageUp`/…), a bare printable key that would swallow
+typing (`o`), and conflicting chords (`ctrl+c`, `ctrl+d`, `ctrl+u`, `ctrl+p`,
+`ctrl+n`, `ctrl+enter`) are each rejected with a specific reason. A key is never
+silently substituted.
+
+### Effective precedence and read timing
+
+Per knob:
+
+```
+explicit programmatic option  >  user config file  >  built-in default
+```
+
+and, for the two request-overridable knobs only:
+
+```
+user displayMode / timeoutPerQuestionMs  >  the model's request value  >  built-in default
+```
+
+So a user who configures `displayMode` or `timeoutPerQuestionMs` always wins over
+whatever the model sends; when the user configured nothing, the model's value
+applies; when neither is set, the built-in default applies.
+
+Timing: the config file is read **once per host/session creation**, never per
+request. For the registered tool the host is built in `session_start`, so the
+route and preferences are fixed for the session; a reload
+(`session_shutdown` + `session_start`) re-reads. `createPiHost` / `createAskUser`
+read once at construction. Route resolution and preference resolution happen
+once, together, and are then immutable.
+
+Programmatic options are accepted by all three entry points:
+`registerAskUser(pi, { mode, displayMode, overlayToggleKey, timeoutPerQuestionMs, configFile })`,
+`createPiHost(ctx, { ... })`, and `createAskUser(ctx, { ... })`. `configFile`
+may point at another path, or be `false` to skip the file (used by embedding and
+by this repo's tests). `overlayToggleKey: null` disables the toggle explicitly.
 
 ## Routing and capabilities
 
@@ -140,9 +213,11 @@ async function askWhereToDeploy(ctx: ExtensionContext) {
   it has one.
 - `ask.host` → the bound `AskUserHost`.
 
-It accepts a Pi `ExtensionContext` (with an optional `{ mode }`) and probes once,
-or a pre-built `AskUserHost` to reuse one. Availability reflects that host's
-structural + configured state.
+It accepts a Pi `ExtensionContext` (with optional options) and probes once,
+reading the user config file once at the same time, or a pre-built
+`AskUserHost` to reuse one. Availability reflects that host's structural +
+configured state. Pass `events` to observe the interactive wait; a direct call
+otherwise emits no runtime events (there is no fabricated bus).
 
 ## Tool result and model fallback
 
@@ -163,6 +238,64 @@ outcome, and it always tells the model **not to invent an answer**:
 
 The ordinary-text advice is tool output only. It is not a route, not an answer,
 and no questionnaire is handed back as if the user had answered it.
+
+## Runtime events
+
+Pi already emits generic `ui_prompt_start` / `ui_prompt_end` around a blocking
+extension UI, but they carry no result semantics. The tool adds result-bearing
+events on `pi.events` (default payloads never include the question, the answers,
+or free text):
+
+| Event | When | Payload (default) |
+| --- | --- | --- |
+| `herdr:blocked` | entering the interactive wait | `{ active: true, label: "Waiting for user response", callId? }` |
+| `herdr:blocked` | the wait terminated, once, for every outcome | `{ active: false, callId? }` |
+| `ask:answered` | the user answered | `{ callId?, route, status: "answered" }` |
+| `ask:aborted` | dismissed or caller-aborted | `{ callId?, route, status: "aborted", cancelledReason: "user" \| "abort" }` |
+| `ask:timeout` | the shared deadline expired | `{ callId?, route, status: "timeout" }` |
+| `ask:error` | the renderer failed / the UI could not finish | `{ callId?, route?, status: "error", errorCode }` |
+
+Guarantees:
+
+- `herdr:blocked` `{ active: true }` is emitted **only when the tool actually
+  enters the interactive wait**, and is always followed by exactly one matching
+  `{ active: false }`, including abort, timeout, and error.
+- Invalid (`invalid_request`) and unavailable/refused requests emit **nothing**:
+  no UI is attempted, so neither a blocked pair nor an outcome event is sent.
+- Each outcome event is emitted **exactly once per UI attempt** and carries the
+  correlation id (the tool call id, when available) plus route/status.
+- The full question, answers, and free text are never broadcast by default.
+
+A direct `createAskUser` caller has no Pi event bus. Instead of faking one, pass
+an optional sink — `createAskUser(ctx, { events: { waitStarted, waitEnded } })`,
+or `createAskUser(host, { events })` — or accept that no runtime events are
+emitted. `AskUserEventSink` is exported for this.
+
+## Overlay show/hide key
+
+On the **custom overlay route only** (never inline, never native), the overlay
+can be hidden and restored with the same key:
+
+- default `alt+o`; configurable via `overlayToggleKey` and disableable with
+  `null` / `"off"` / `"none"` / `"disabled"`; reserved/conflicting keys are
+  rejected by config validation (see above) so `Esc` always keeps cancelling;
+- implemented with `ctx.ui.custom(..., { onHandle })` →
+  `OverlayHandle.setHidden()`, plus a raw `ctx.ui.onTerminalInput` listener so the
+  **same** key restores the overlay even while hidden (a hidden overlay receives
+  no component input);
+- the toggle key is consumed; Kitty press/repeat/release events are handled so a
+  single physical press cannot hide and immediately re-show it;
+- the first hide shows a one-time discoverable restore notice
+  (`ask_user hidden — press <key> to reopen`);
+- cleanup is idempotent and **does not depend on `ui.custom()` resolving**. The
+  core settles a timeout/abort independently, so the renderer listens to the
+  interaction signal and removes the raw listener, drops the handle, and aborts
+  the component immediately; the same cleanup also runs from `finally`. A
+  renderer that ignores its signal and never resolves therefore cannot keep
+  capturing keys or leave UI side effects after termination;
+- hiding neither resolves the interaction nor pauses its deadline — aborts and
+  timeouts still complete while hidden — and `Esc` still cancels;
+- inline display and the native route register no listener at all.
 
 ## Results
 
@@ -197,6 +330,14 @@ for a refused explicit config, names the requested route.
 - **A missing route is an error, not a downgrade.** JSON/print, or an explicit
   `mode` that cannot run, is refused with `unsupported_mode` and never replaced by
   another route.
+- **Configuration is a file, never the environment.** No `process.env` knob
+  exists; `~/.pi/ask-user/config.json` is read once per host/session and
+  strictly validated. An invalid config is `invalid_config`, never a fallback.
+- **Events never leak content by default.** `herdr:blocked` bounds a real wait
+  exactly once on each side; outcome events are one per UI attempt and carry only
+  correlation id, route, and status.
+- **The overlay toggle is overlay-only.** Inline and native register no raw
+  input listener; hiding never pauses the deadline.
 - **The native route uses single-line `input`**, one question at a time (not
   `editor`, which accepts no timeout/signal). The number and an optional note
   share one box: `2`, `2 | note`, or free text; a number list may be

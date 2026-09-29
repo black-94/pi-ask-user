@@ -4,6 +4,7 @@ import type {
 	AskUserMode,
 	AskUserRoute,
 	AskUserSupport,
+	AskUserUiPreferences,
 	CustomUIRenderer,
 	HostCapabilities,
 	HostImplementations,
@@ -93,18 +94,41 @@ export interface CreateAskUserHostOptions {
 	mode?: AskUserMode;
 	customUI?: CustomUIRenderer;
 	nativeDialogs?: NativeDialogRunner;
+	/** User presentation preferences, resolved once by the caller (option > file). */
+	preferences?: AskUserUiPreferences;
+	/**
+	 * When set, the user configuration was invalid: the host is created
+	 * unusable, with `support.status === "invalid_config"` and this actionable
+	 * reason. Capabilities are still probed so the error can name what could
+	 * have run — but no route is fabricated and nothing is ever asked.
+	 */
+	configError?: string;
 }
 
 /**
  * Build a host adapter, binding only the implementations that were supplied and
  * resolving {@link AskUserHost.support} here — at creation. Nothing is read from
  * the environment and no route is selected again later.
+ *
+ * An invalid user configuration makes the host unusable: its support is
+ * `invalid_config` with that reason, so every call is refused actionably rather
+ * than falling back to a probed route.
  */
 export function createAskUserHost(options: CreateAskUserHostOptions): AskUserHost {
+	const capabilities = hostCapabilities(options);
 	const host: AskUserHost = {
 		name: options.name,
-		support: resolveSupport(options.mode, hostCapabilities(options)),
+		support:
+			options.configError !== undefined
+				? {
+						status: "invalid_config",
+						capabilities,
+						available: probeRoutes(capabilities),
+						reason: options.configError,
+					}
+				: resolveSupport(options.mode, capabilities),
 	};
+	if (options.preferences !== undefined) host.preferences = options.preferences;
 	if (options.customUI) host.customUI = options.customUI;
 	if (options.nativeDialogs) host.nativeDialogs = options.nativeDialogs;
 	return host;

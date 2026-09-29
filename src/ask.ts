@@ -1,7 +1,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPiHost } from "./adapters/pi.ts";
 import { askUser } from "./core.ts";
-import type { AskUserHost, AskUserMode, AskUserResult } from "./types.ts";
+import type {
+	AskUserDisplayMode,
+	AskUserEventSink,
+	AskUserHost,
+	AskUserMode,
+	AskUserResult,
+} from "./types.ts";
 
 /** Options for {@link createAskUser}. */
 export interface CreateAskUserOptions {
@@ -11,6 +17,31 @@ export interface CreateAskUserOptions {
 	 * substituted.
 	 */
 	mode?: AskUserMode;
+	/** Explicit display mode; overrides the config file and the request. */
+	displayMode?: AskUserDisplayMode;
+	/** Explicit overlay toggle key; `null` disables it. Overrides the config file. */
+	overlayToggleKey?: string | null;
+	/** Explicit timeout (ms) per question; overrides the config file and the request. */
+	timeoutPerQuestionMs?: number;
+	/** Path to the user config file, or `false` to skip reading it. */
+	configFile?: string | false;
+	/**
+	 * Optional observer for the interactive wait. A direct caller has no Pi event
+	 * bus, so nothing is emitted unless this is supplied — there is no fabricated
+	 * bus access. Pass a sink to receive `waitStarted`/`waitEnded` around each UI
+	 * attempt.
+	 */
+	events?: AskUserEventSink;
+}
+
+/**
+ * Options accepted when reusing an already-built {@link AskUserHost}. The config
+ * knobs were resolved into the host at its creation, so only call-scoped
+ * observers apply here.
+ */
+export interface CreateAskUserFromHostOptions {
+	/** Optional observer for the interactive wait (see {@link CreateAskUserOptions.events}). */
+	events?: AskUserEventSink;
 }
 
 /**
@@ -42,19 +73,27 @@ function isAskUserHost(value: ExtensionContext | AskUserHost): value is AskUserH
 /**
  * Bind a directly callable `ask` to a host.
  *
- * Pass a Pi `ExtensionContext` (optionally with an explicit `{ mode }`) to probe
- * the environment once, or pass a pre-built {@link AskUserHost} to reuse one. The
- * result exposes `isAvailable` / `notAvailableReason` up front, so callers can
- * decide before showing any UI.
+ * Pass a Pi `ExtensionContext` (optionally with explicit options) to probe the
+ * environment and read the user config once, or pass a pre-built
+ * {@link AskUserHost} to reuse one. The result exposes `isAvailable` /
+ * `notAvailableReason` up front, so callers can decide before showing any UI.
+ *
+ * A direct call has no Pi event bus: pass `events` to observe the interactive
+ * wait, or accept that no runtime events are emitted.
  */
 export function createAskUser(ctx: ExtensionContext, options?: CreateAskUserOptions): AskUser;
-export function createAskUser(host: AskUserHost): AskUser;
-export function createAskUser(source: ExtensionContext | AskUserHost, options: CreateAskUserOptions = {}): AskUser {
+export function createAskUser(host: AskUserHost, options?: CreateAskUserFromHostOptions): AskUser;
+export function createAskUser(
+	source: ExtensionContext | AskUserHost,
+	options: CreateAskUserOptions | CreateAskUserFromHostOptions = {},
+): AskUser {
 	const host = isAskUserHost(source)
 		? source
-		: createPiHost(source, options.mode === undefined ? {} : { mode: options.mode });
+		: createPiHost(source, options as CreateAskUserOptions);
 	const support = host.support;
-	const ask = ((request: unknown) => askUser(request, { host })) as AskUser;
+	const events = options.events;
+	const ask = ((request: unknown) =>
+		askUser(request, events ? { host, events } : { host })) as AskUser;
 	Object.defineProperties(ask, {
 		isAvailable: { value: support.status === "available", enumerable: true },
 		notAvailableReason: { value: support.status === "available" ? undefined : support.reason, enumerable: true },

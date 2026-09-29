@@ -1,7 +1,7 @@
 {
   "name": "pi-ask-user",
   "version": "0.1.0",
-  "description": "AskUserUI - a route-forced ask-user interaction component/tool for Pi extensions (custom TUI or native dialogs)",
+  "description": "AskUser - a route-forced ask-user interaction component/tool for Pi extensions (custom TUI or native dialogs)",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -10,7 +10,7 @@
     "pi-coding-agent",
     "extension",
     "ask_user",
-    "AskUserUI",
+    "AskUser",
     "interactive"
   ],
   "pi": {

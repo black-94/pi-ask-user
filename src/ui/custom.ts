@@ -38,6 +38,12 @@ export interface AskUserComponentOptions {
 	theme: AskUserTheme;
 	tui: AskUserTUI;
 	done: (result: CustomUIResult) => void;
+	/**
+	 * Overlay show/hide key spec (for example `alt+o`), when the custom overlay
+	 * registered one. Shown in the key hints so the shortcut is discoverable.
+	 * `undefined` means the toggle is disabled or the route is inline.
+	 */
+	overlayToggleKey?: string;
 }
 
 /** Terminal/pane width at or above which the preview gets its own column. */
@@ -60,6 +66,10 @@ const DESCRIPTION_INDENT = "       ";
 const MAX_TITLE_LINES = 2;
 const MAX_PROMPT_LINES = 3;
 const MAX_NOTICE_LINES = 2;
+/** Keep short overlays prominent without consuming the whole terminal. */
+export const MIN_OVERLAY_ROWS = 14;
+const OVERLAY_MAX_HEIGHT_RATIO = 0.85;
+const OVERLAY_MARGIN = 1;
 
 function buildMarkdownTheme(theme: AskUserTheme): MarkdownTheme {
 	const color = (name: string) => (text: string) => theme.fg(name, text);
@@ -129,12 +139,16 @@ export class AskUserComponent implements Component, Focusable {
 	private readonly cursors: number[];
 	private readonly inputs: Input[];
 	private readonly mdTheme: MarkdownTheme;
+	private readonly overlayToggleKey: string | undefined;
 	private readonly previewCache = new Map<string, Markdown>();
 
 	private tab = 0;
+	private reviewButtonFocused = false;
 	private notice: string | undefined;
 	private finished = false;
 	private timer: ReturnType<typeof setTimeout> | undefined;
+	private countdownTick: ReturnType<typeof setInterval> | undefined;
+	private remainingSeconds = 0;
 	private cachedWidth: number | undefined;
 	private cachedRows: number | undefined;
 	private cachedLines: string[] | undefined;
@@ -154,13 +168,27 @@ export class AskUserComponent implements Component, Focusable {
 		this.tui = options.tui;
 		this.done = options.done;
 		this.mdTheme = buildMarkdownTheme(options.theme);
+		this.overlayToggleKey =
+			options.request.displayMode === "overlay" ? options.overlayToggleKey : undefined;
 		this.drafts = options.request.questions.map(() => emptyDraft());
 		this.cursors = options.request.questions.map(() => 0);
 		this.inputs = options.request.questions.map(
-			(question) => new Input({ prompt: "› ", placeholder: placeholderFor(question) }),
+			(question) => new Input({
+				prompt: "› ",
+				placeholder: placeholderFor(question),
+				placeholderStyle: (text) => this.theme.fg("muted", text),
+			}),
 		);
 		const remaining = Math.max(0, this.deadline.remainingMs());
+		this.remainingSeconds = Math.ceil(remaining / 1000);
 		this.timer = setTimeout(() => this.finish({ kind: "timeout" }), remaining);
+		this.countdownTick = setInterval(() => {
+			const seconds = Math.ceil(Math.max(0, this.deadline.remainingMs()) / 1000);
+			if (seconds !== this.remainingSeconds) {
+				this.remainingSeconds = seconds;
+				this.refresh();
+			}
+		}, 250);
 	}
 
 	/**
@@ -188,6 +216,10 @@ export class AskUserComponent implements Component, Focusable {
 		if (this.timer) {
 			clearTimeout(this.timer);
 			this.timer = undefined;
+		}
+		if (this.countdownTick) {
+			clearInterval(this.countdownTick);
+			this.countdownTick = undefined;
 		}
 	}
 
@@ -252,6 +284,7 @@ export class AskUserComponent implements Component, Focusable {
 		// Preserve typed text on the tab being left.
 		this.syncAllDrafts();
 		this.tab = (this.tab + delta + this.tabCount) % this.tabCount;
+		this.reviewButtonFocused = false;
 		this.notice = undefined;
 		this.resetScroll();
 		this.refresh();
@@ -355,7 +388,15 @@ export class AskUserComponent implements Component, Focusable {
 		if (this.isScrollKey(data)) return;
 
 		if (this.isReview) {
-			if (matchesKey(data, Key.enter)) this.submitAll();
+			if (matchesKey(data, Key.down) || matchesKey(data, "ctrl+n")) {
+				this.reviewButtonFocused = true;
+				this.refresh();
+			} else if (matchesKey(data, Key.up) || matchesKey(data, "ctrl+p")) {
+				this.reviewButtonFocused = false;
+				this.refresh();
+			} else if (matchesKey(data, Key.enter) || (this.reviewButtonFocused && matchesKey(data, Key.space))) {
+				this.submitAll();
+			}
 			return;
 		}
 
@@ -393,7 +434,16 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.space)) {
-			this.toggleRow();
+			if (question.kind === "multi") {
+				this.toggleRow();
+			} else {
+				this.syncDraftFromInput(this.tab);
+				this.drafts[this.tab]!.selections = [this.rowIndex()];
+				this.drafts[this.tab]!.usedDefault = false;
+				this.notice = undefined;
+				this.resetScroll();
+				this.refresh();
+			}
 			return;
 		}
 		if (matchesKey(data, Key.enter)) {
@@ -492,6 +542,7 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 		this.tab = this.request.questions.length;
+		this.reviewButtonFocused = false;
 		this.notice = undefined;
 		this.resetScroll();
 		this.refresh();
@@ -504,6 +555,7 @@ export class AskUserComponent implements Component, Focusable {
 		if (unanswered.length > 0) {
 			const first = unanswered[0]!;
 			this.tab = first;
+			this.reviewButtonFocused = false;
 			this.cursors[first] = 0;
 			this.notice = `Question ${first + 1} has no answer yet; answer it first.`;
 			this.resetScroll();
@@ -519,6 +571,31 @@ export class AskUserComponent implements Component, Focusable {
 		const visible = visibleWidth(line);
 		if (visible >= width) return line;
 		return line + " ".repeat(width - visible);
+	}
+
+	private countdownLabel(): string {
+		const hours = Math.floor(this.remainingSeconds / 3600);
+		const minutes = Math.floor((this.remainingSeconds % 3600) / 60);
+		const seconds = String(this.remainingSeconds % 60).padStart(2, "0");
+		return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`;
+	}
+
+	/** Match the reference dialog's bordered card without affecting input or answers. */
+	private frameLines(lines: string[], width: number): string[] {
+		const innerWidth = width - 4; // │ + space on each side
+		const countdown = truncateToWidth(this.countdownLabel(), Math.max(1, width - 8));
+		const label = this.request.header?.trim() || "ask_user";
+		const heading = `╭─ ${truncateToWidth(label, Math.max(1, width - visibleWidth(countdown) - 7))} ${countdown} `;
+		const top = heading + "─".repeat(width - visibleWidth(heading) - 1) + "╮";
+		return [
+			this.theme.fg("accent", top),
+			...lines.map((line) =>
+				this.theme.fg("accent", "│ ") +
+				this.padTo(truncateToWidth(line, innerWidth), innerWidth) +
+				this.theme.fg("accent", " │"),
+			),
+			this.theme.fg("accent", "╰" + "─".repeat(width - 2) + "╯"),
+		];
 	}
 
 	private wrap(text: string, width: number): string[] {
@@ -581,7 +658,7 @@ export class AskUserComponent implements Component, Focusable {
 		const box = question.kind === "multi" ? (selected ? "▣" : "▢") : selected ? "◉" : "○";
 		const selectedMark = selected ? this.theme.fg("success", box) : this.theme.fg("muted", box);
 		const label = question.options[index]!.label;
-		const labelText = isCursor ? this.theme.bold(label) : label;
+		const labelText = isCursor ? this.theme.fg("accent", this.theme.bold(label)) : label;
 		const lines = [truncateToWidth(`  ${cursorMark} ${selectedMark} ${index + 1}. ${labelText}`, width)];
 		const description = question.options[index]!.description;
 		if (description) {
@@ -670,11 +747,18 @@ export class AskUserComponent implements Component, Focusable {
 		return input
 			.render(Math.max(1, width - 2))
 			.slice(0, 1)
-			.map((line) => truncateToWidth(`  ${line}`, width));
+			.map((line) => {
+				// Pi's Input draws an inverse-video fake cursor even when unfocused.
+				// Only show that highlight while this row actually owns input focus.
+				const display = input.focused ? line : line.replaceAll("\x1b[7m", "").replaceAll("\x1b[27m", "");
+				return truncateToWidth(`  ${display}`, width);
+			});
 	}
 
 	private renderSubmitBar(width: number): string[] {
-		return [truncateToWidth(this.theme.fg("accent", "  [ Enter Submit ]"), width)];
+		const label = this.reviewButtonFocused ? "▸ [ Enter Submit ]" : "  [ Enter Submit ]";
+		const styled = this.theme.fg("accent", this.reviewButtonFocused ? (this.theme.inverse?.(label) ?? label) : label);
+		return [truncateToWidth(styled, width)];
 	}
 
 	private renderReview(width: number): string[] {
@@ -706,13 +790,20 @@ export class AskUserComponent implements Component, Focusable {
 	}
 
 	private hintLine(): string {
-		if (this.isReview) return this.theme.fg("dim", "Enter submit · Tab switch question · Esc cancel");
+		const toggleHint = this.overlayToggleKey ? `${this.overlayToggleKey} hide` : undefined;
+		if (this.isReview) {
+			const reviewHints = ["↓ focus submit", "Enter submit", "Tab switch question"];
+			if (toggleHint) reviewHints.push(toggleHint);
+			reviewHints.push("Esc cancel");
+			return this.theme.fg("dim", reviewHints.join(" · "));
+		}
 		const question = this.currentQuestion();
 		const hints = ["Tab switch", "↑/↓ move", `Enter ${this.isInputRow() ? "confirm" : "select"}`];
 		if (question.kind === "multi") hints.push("Space multi-select");
 		if (question.hasDefault) hints.push("s use default");
 		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn preview");
 		if (this.isInputRow() && question.options.length > 0) hints.push("↑ back to options");
+		if (toggleHint) hints.push(toggleHint);
 		hints.push("Esc cancel");
 		return this.theme.fg("dim", hints.join(" · "));
 	}
@@ -728,27 +819,43 @@ export class AskUserComponent implements Component, Focusable {
 			return [];
 		}
 
+		// The host caps overlays at 85% with a one-row margin. Respect that cap
+		// ourselves so the host never chops off the pinned input or bottom border.
+		const availableRows = this.request.displayMode === "overlay" && physical >= 7
+			? Math.min(physical, Math.floor(physical * OVERLAY_MAX_HEIGHT_RATIO), Math.max(0, physical - 2 * OVERLAY_MARGIN))
+			: physical;
+		// Small viewports keep the original minimal layout so controls remain visible.
+		const framed = lineWidth >= 16 && availableRows >= 7;
+		const contentWidth = framed ? lineWidth - 4 : lineWidth;
+		const contentRows = framed ? availableRows - 2 : availableRows;
+
 		// Fixed blocks, with the free-input row and key hints guaranteed highest
 		// priority so they survive a short terminal.
 		const titleText = this.isReview
 			? "Review before submitting"
 			: `${this.currentQuestion().index + 1}/${this.request.questions.length}. ${this.currentQuestion().title}`;
-		const titleBlock = this.wrap(this.theme.bold(this.theme.fg("accent", titleText)), lineWidth).slice(
+		const titleBlock = this.wrap(this.theme.bold(this.theme.fg("accent", titleText)), contentWidth).slice(
 			0,
 			MAX_TITLE_LINES,
 		);
-		const tabsBlock = this.request.questions.length > 1 ? [this.renderTabs(lineWidth)] : [];
+		const tabsBlock = this.request.questions.length > 1 ? [this.renderTabs(contentWidth)] : [];
+		const countdown = this.countdownLabel();
+		const headerBlock = !framed
+			? [contentWidth <= visibleWidth(countdown) + 1
+				? truncateToWidth(countdown, contentWidth)
+				: `${this.theme.bold(truncateToWidth(this.request.header?.trim() || "ask_user", contentWidth - visibleWidth(countdown) - 1))} ${countdown}`]
+			: [];
 		const prompt = this.isReview ? undefined : this.currentQuestion().prompt?.trim();
 		const promptBlock = prompt
-			? this.wrap(this.theme.fg("text", prompt), lineWidth).slice(0, MAX_PROMPT_LINES)
+			? this.wrap(this.theme.fg("text", prompt), contentWidth).slice(0, MAX_PROMPT_LINES)
 			: [];
 		const noticeBlock = this.notice
-			? this.wrap(this.theme.fg("warning", `⚠ ${this.notice}`), lineWidth).slice(0, MAX_NOTICE_LINES)
+			? this.wrap(this.theme.fg("warning", `⚠ ${this.notice}`), contentWidth).slice(0, MAX_NOTICE_LINES)
 			: [];
-		const inputBlock = this.isReview ? this.renderSubmitBar(lineWidth) : this.renderInputBar(lineWidth);
+		const inputBlock = this.isReview ? this.renderSubmitBar(contentWidth) : this.renderInputBar(contentWidth);
 		const hintBlock = [this.hintLine()];
 
-		let remaining = physical;
+		let remaining = contentRows;
 		const take = (block: string[]): string[] => {
 			if (remaining <= 0 || block.length === 0) return [];
 			const use = Math.min(block.length, remaining);
@@ -759,12 +866,19 @@ export class AskUserComponent implements Component, Focusable {
 		const hintOut = take(hintBlock);
 		const titleOut = take(titleBlock);
 		const tabsOut = take(tabsBlock);
+		const headerOut = take(headerBlock);
 		const noticeOut = take(noticeBlock);
 		const promptOut = take(promptBlock);
-		const bodyOut = remaining > 0 ? this.renderBodyArea(lineWidth, remaining) : [];
+		const bodyOut = remaining > 0 ? this.renderBodyArea(contentWidth, remaining) : [];
 
-		const lines = [...titleOut, ...tabsOut, ...promptOut, ...noticeOut, ...bodyOut, ...inputOut, ...hintOut];
-		const finalLines = lines.slice(0, physical).map((line) => truncateToWidth(line, lineWidth));
+		const leading = [...headerOut, ...tabsOut, ...titleOut, ...promptOut, ...noticeOut, ...bodyOut];
+		const minimum = this.request.displayMode === "overlay" ? Math.min(MIN_OVERLAY_ROWS, availableRows) : 0;
+		const padding = Math.max(0, minimum - (leading.length + inputOut.length + hintOut.length + (framed ? 2 : 0)));
+		// Keep input/Submit adjacent to the choices, while pinning the key hints
+		// to the bottom edge of a padded overlay.
+		const lines = [...leading, ...inputOut, ...Array<string>(padding).fill(""), ...hintOut];
+		const content = lines.slice(0, contentRows).map((line) => truncateToWidth(line, contentWidth));
+		const finalLines = framed ? this.frameLines(content, lineWidth) : content;
 		this.cachedWidth = lineWidth;
 		this.cachedRows = physical;
 		this.cachedLines = finalLines;

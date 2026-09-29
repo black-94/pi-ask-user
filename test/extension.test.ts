@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
@@ -36,7 +39,10 @@ function harness(options: RegisterAskUserOptions = {}) {
 			tool = definition;
 		},
 	} as unknown as ExtensionAPI;
-	registerAskUser(pi, options);
+	// `configFile: false` keeps tests hermetic: they never read the developer's
+	// real ~/.pi/ask-user/config.json. Tests that exercise the file pass
+	// an explicit `configFile` to override.
+	registerAskUser(pi, { configFile: false, ...options });
 	assert.ok(tool, "tool must be registered");
 	return { tool, handlers };
 }
@@ -121,10 +127,10 @@ function execute(tool: Record<string, unknown>, params: unknown, ctx: ExtensionC
 	return (tool as unknown as FakeTool).execute(id, params, undefined, undefined, ctx);
 }
 
-test("registers AskUser as a sequential tool and subscribes to the session lifecycle", () => {
+test("registers ask_user as a sequential tool and subscribes to the session lifecycle", () => {
 	const { tool, handlers } = harness();
 	const definition = tool as unknown as FakeTool;
-	assert.equal(definition.name, "AskUser");
+	assert.equal(definition.name, "ask_user");
 	assert.equal(definition.executionMode, "sequential");
 	assert.equal(handlers.get("session_start")?.length, 1);
 	assert.equal(handlers.get("session_shutdown")?.length, 1);
@@ -411,10 +417,10 @@ test("a reload re-initialises the host from the fresh context", async () => {
 });
 
 test("createPiHost is public: other extensions can build a host and inspect its support", () => {
-	const noUI = createPiHost(noUICtx("json"));
+	const noUI = createPiHost(noUICtx("json"), { configFile: false });
 	assert.equal(askUserSupport(noUI).status, "no_available_ui");
 
-	const nativeOnly = createPiHost(rpcCtx(async () => "2"));
+	const nativeOnly = createPiHost(rpcCtx(async () => "2"), { configFile: false });
 	const nativeSupport = askUserSupport(nativeOnly);
 	assert.equal(nativeSupport.status, "available");
 	if (nativeSupport.status === "available") {
@@ -422,7 +428,7 @@ test("createPiHost is public: other extensions can build a host and inspect its 
 		assert.equal(nativeSupport.source, "probed");
 	}
 
-	const both = createPiHost(tuiWithCustom());
+	const both = createPiHost(tuiWithCustom(), { configFile: false });
 	const bothSupport = askUserSupport(both);
 	assert.equal(bothSupport.status, "available");
 	if (bothSupport.status === "available") {
@@ -430,14 +436,61 @@ test("createPiHost is public: other extensions can build a host and inspect its 
 		assert.deepEqual(bothSupport.available, ["custom", "native"]);
 	}
 
-	const configuredMismatch = createPiHost(rpcCtx(async () => "2"), { mode: "custom" });
+	const configuredMismatch = createPiHost(rpcCtx(async () => "2"), { mode: "custom", configFile: false });
 	assert.equal(configuredMismatch.support.status, "configured_unavailable");
 });
 
 test("a host created outside the extension answers with the usual semantics", async () => {
-	const host = createPiHost(rpcCtx(async () => "2"));
+	const host = createPiHost(rpcCtx(async () => "2"), { configFile: false });
 	const result = await askUser(PARAMS, { host });
 	assert.equal(result.route, "native");
 	assert.equal(result.status, "answered");
 	assert.equal(result.answers[0]!.selections[0], "prod");
+});
+
+// --- user config file integration ---
+
+const configDir = mkdtempSync(join(tmpdir(), "pi-ask-user-ext-"));
+let configCounter = 0;
+function configFile(value: unknown, raw = false): string {
+	const path = join(configDir, `settings-${configCounter++}.json`);
+	writeFileSync(path, raw ? String(value) : JSON.stringify(value), "utf8");
+	return path;
+}
+test.after(() => rmSync(configDir, { recursive: true, force: true }));
+
+test("a config-file mode drives the session route and is read once per session", async () => {
+	const path = configFile({ mode: "native" });
+	const { tool, handlers } = harness({ configFile: path });
+	// A TUI context would probe to custom; the file forces native.
+	startSession(handlers, tuiWithCustom());
+	const first = await execute(tool, PARAMS, tuiWithCustom(), "call-config-one");
+	assert.equal(first.details.route, "native");
+	assert.equal(first.details.status, "answered");
+
+	// Rewriting the file does not change the already-created session host.
+	writeFileSync(path, JSON.stringify({ mode: "custom" }), "utf8");
+	const second = await execute(tool, PARAMS, tuiWithCustom(), "call-config-two");
+	assert.equal(second.details.route, "native");
+});
+
+test("an explicit programmatic mode beats the config file", async () => {
+	const path = configFile({ mode: "native" });
+	const { tool, handlers } = harness({ configFile: path, mode: "custom" });
+	startSession(handlers, tuiWithCustom());
+	const result = await execute(tool, PARAMS, tuiWithCustom(), "call-config-override");
+	assert.equal(result.details.route, "custom");
+	assert.equal(result.details.status, "answered");
+});
+
+test("an invalid config file refuses every call with invalid_config, never a fallback", async () => {
+	const path = configFile("{ not json", true);
+	const { tool, handlers } = harness({ configFile: path });
+	startSession(handlers, rpcCtx(async () => "2"));
+	const result = await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-config-invalid");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "invalid_config");
+	assert.equal(result.details.route, undefined, "no route is fabricated");
+	assert.match(result.content[0]!.text, /not valid JSON/);
+	assert.match(result.content[0]!.text, FALLBACK_ADVICE, "an unusable config advises a text fallback");
 });

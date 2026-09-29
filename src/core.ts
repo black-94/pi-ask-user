@@ -6,11 +6,33 @@ import type {
 	AskUserResult,
 	AskUserSupport,
 	AskUserOptions,
+	AskUserUiPreferences,
 	NormalizedRequest,
 } from "./types.ts";
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Apply the host's user-configured UI preferences over a normalized request.
+ *
+ * Precedence, per knob: explicit user preference > request value > built-in
+ * default (the latter already baked into the normalized request by the schema).
+ * The timeout is recomputed from the effective per-question value so the single
+ * shared deadline stays `timeoutPerQuestionMs × questionCount`.
+ */
+function applyPreferences(request: NormalizedRequest, preferences: AskUserUiPreferences | undefined): NormalizedRequest {
+	if (!preferences) return request;
+	const displayMode = preferences.displayMode ?? request.displayMode;
+	const timeoutPerQuestionMs = preferences.timeoutPerQuestionMs ?? request.timeoutPerQuestionMs;
+	if (displayMode === request.displayMode && timeoutPerQuestionMs === request.timeoutPerQuestionMs) return request;
+	return {
+		...request,
+		displayMode,
+		timeoutPerQuestionMs,
+		totalTimeoutMs: timeoutPerQuestionMs * request.questions.length,
+	};
 }
 
 /**
@@ -49,7 +71,7 @@ export async function askUserNormalized(
 	options: AskUserOptions,
 	warnings: string[] = [],
 ): Promise<AskUserResult> {
-	const { host, signal, onUpdate, now } = options;
+	const { host, signal, onUpdate, now, events } = options;
 	// The route was resolved once, when the host was created; the core never
 	// re-selects it. A host that cannot prompt here is refused before any
 	// rendering, and never in favour of a different route.
@@ -64,14 +86,44 @@ export async function askUserNormalized(
 		return finish({ status: "aborted", route, answers: [], cancelledReason: "abort" }, warnings);
 	}
 
-	const deadline = createDeadline(request.totalTimeoutMs, now);
+	// User preferences (explicit option over the user config file) win over the
+	// request's own displayMode/timeout; the request wins over the built-in
+	// defaults already applied by the schema.
+	const effectiveRequest = applyPreferences(request, host.preferences);
+	const deadline = createDeadline(effectiveRequest.totalTimeoutMs, now);
 	const deadlineController = new AbortController();
 	const linked = combineSignals(signal, deadlineController.signal);
 
-	const input: AskUIInput = { request, deadline, signal: linked.signal };
+	const input: AskUIInput = { request: effectiveRequest, deadline, signal: linked.signal };
 	if (onUpdate) input.onUpdate = onUpdate;
 
+	// Wait events are emitted exactly around a real UI attempt: `waitStarted`
+	// immediately before the renderer is invoked, and `waitEnded` once on the
+	// single settle path. Requests refused before this point emit nothing.
+	let waitStarted = false;
+	const notifyStart = (): void => {
+		if (!events) return;
+		try {
+			events.waitStarted();
+		} catch {
+			// An observer must never break the interaction.
+		}
+		waitStarted = true;
+	};
+	const settle = (result: AskUserResult): AskUserResult => {
+		const finalized = finish(result, warnings);
+		if (waitStarted && events) {
+			try {
+				events.waitEnded(finalized);
+			} catch {
+				// An observer must never break the interaction.
+			}
+		}
+		return finalized;
+	};
+
 	let renderPromise: Promise<AskUIOutcome>;
+	notifyStart();
 	try {
 		if (route === "custom") {
 			if (!host.customUI) throw new Error("customUI capability declared without a renderer");
@@ -82,7 +134,7 @@ export async function askUserNormalized(
 		}
 	} catch (error) {
 		linked.dispose();
-		return finish(mapOutcome({ kind: "error", message: messageOf(error) }, route, request), warnings);
+		return settle(mapOutcome({ kind: "error", message: messageOf(error) }, route, effectiveRequest));
 	}
 
 	// The core owns the guarantee: even a renderer that ignores its AbortSignal
@@ -100,11 +152,11 @@ export async function askUserNormalized(
 
 	if (race.kind === "timeout") {
 		deadlineController.abort();
-		return finish({ status: "timeout", route, answers: [] }, warnings);
+		return settle({ status: "timeout", route, answers: [] });
 	}
 	if (race.kind === "abort") {
 		deadlineController.abort();
-		return finish({ status: "aborted", route, answers: [], cancelledReason: "abort" }, warnings);
+		return settle({ status: "aborted", route, answers: [], cancelledReason: "abort" });
 	}
 
 	let outcome = race.outcome;
@@ -113,7 +165,7 @@ export async function askUserNormalized(
 		outcome = { kind: "timeout" };
 	}
 
-	return finish(mapOutcome(outcome, route, request), warnings);
+	return settle(mapOutcome(outcome, route, effectiveRequest));
 }
 
 type DeadlineRace =
