@@ -106,7 +106,7 @@ function printableText(data: string): string | undefined {
 }
 
 /**
- * Custom terminal UI for AskUserUI.
+ * Custom terminal UI for AskUser.
  *
  * Layout: a fixed title/tabs/prompt/notice header, a scrollable body (options,
  * and the preview either in a right column or stacked below), a **pinned free

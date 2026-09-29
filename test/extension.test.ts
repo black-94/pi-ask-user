@@ -4,10 +4,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { Component } from "@earendil-works/pi-tui";
 import {
 	createPiHost,
-	registerAskUserUITool,
+	registerAskUser,
 	askUserSupport,
-	type AskUserUIDetails,
-	type RegisterAskUserUIOptions,
+	type AskUserToolDetails,
+	type RegisterAskUserOptions,
 } from "../src/index.ts";
 import { askUser } from "../src/core.ts";
 
@@ -22,7 +22,7 @@ const identityTheme = {
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
-function harness(options: RegisterAskUserUIOptions = {}) {
+function harness(options: RegisterAskUserOptions = {}) {
 	const handlers = new Map<string, Handler[]>();
 	let tool: Record<string, unknown> | undefined;
 	const pi = {
@@ -36,7 +36,7 @@ function harness(options: RegisterAskUserUIOptions = {}) {
 			tool = definition;
 		},
 	} as unknown as ExtensionAPI;
-	registerAskUserUITool(pi, options);
+	registerAskUser(pi, options);
 	assert.ok(tool, "tool must be registered");
 	return { tool, handlers };
 }
@@ -61,7 +61,7 @@ interface FakeTool {
 		signal: AbortSignal | undefined,
 		onUpdate: undefined,
 		ctx: ExtensionContext,
-	) => Promise<{ content: Array<{ type: string; text: string }>; details: AskUserUIDetails }>;
+	) => Promise<{ content: Array<{ type: string; text: string }>; details: AskUserToolDetails }>;
 }
 
 const PARAMS = {
@@ -70,6 +70,9 @@ const PARAMS = {
 
 /** Same question, but with a deadline short enough to test timeouts. */
 const PARAMS_FAST = { ...PARAMS, timeoutPerQuestionMs: 30 };
+
+/** Ordinary-text fallback advice, offered only for UI-unavailable/failure results. */
+const FALLBACK_ADVICE = /ask the user the question yourself in ordinary text/i;
 
 function noUICtx(mode: "json" | "print"): ExtensionContext {
 	return { mode, hasUI: false, ui: {} } as unknown as ExtensionContext;
@@ -81,7 +84,7 @@ function rpcCtx(input: (prompt: string) => Promise<string | undefined>): Extensi
 }
 
 /** A TUI context that exposes both a callable input dialog and a custom renderer. */
-function tuiWithCustom(onRender?: (rendered: string) => void): ExtensionContext {
+function tuiWithCustom(onRender?: (rendered: string) => void, key = "\r"): ExtensionContext {
 	return {
 		mode: "tui",
 		hasUI: true,
@@ -96,8 +99,20 @@ function tuiWithCustom(onRender?: (rendered: string) => void): ExtensionContext 
 						(result: unknown) => resolve(result),
 					);
 					onRender?.(component.render(100).join("\n"));
-					queueMicrotask(() => component.handleInput?.("\r"));
+					queueMicrotask(() => component.handleInput?.(key));
 				}),
+		},
+	} as unknown as ExtensionContext;
+}
+
+/** A TUI context whose custom renderer resolves a fixed outcome (no real component). */
+function tuiCustomOutcome(outcome: unknown): ExtensionContext {
+	return {
+		mode: "tui",
+		hasUI: true,
+		ui: {
+			input: async () => "2",
+			custom: async () => outcome,
 		},
 	} as unknown as ExtensionContext;
 }
@@ -106,24 +121,21 @@ function execute(tool: Record<string, unknown>, params: unknown, ctx: ExtensionC
 	return (tool as unknown as FakeTool).execute(id, params, undefined, undefined, ctx);
 }
 
-test("registers AskUserUI as a sequential tool and subscribes to the session lifecycle", () => {
+test("registers AskUser as a sequential tool and subscribes to the session lifecycle", () => {
 	const { tool, handlers } = harness();
 	const definition = tool as unknown as FakeTool;
-	assert.equal(definition.name, "AskUserUI");
+	assert.equal(definition.name, "AskUser");
 	assert.equal(definition.executionMode, "sequential");
 	assert.equal(handlers.get("session_start")?.length, 1);
 	assert.equal(handlers.get("session_shutdown")?.length, 1);
 	const guidelines = definition.promptGuidelines?.join(" ") ?? "";
-	assert.match(guidelines, /unsupported_mode/, "the no-UI guidance must point at unsupported_mode");
-	assert.match(guidelines, /cannot display the configured UI/i, "the model must report the host cannot display it");
-	assert.match(guidelines, /do not answer the question yourself/i, "the model must not answer on the user's behalf");
-	assert.match(guidelines, /retry(ing)? in a host that supports/i, "the model must suggest a supporting host");
+	assert.match(guidelines, FALLBACK_ADVICE, "the guidance must direct an ordinary-text question when the UI fails");
+	assert.match(guidelines, /never invent an answer/i, "the guidance must forbid fabricating an answer");
 	assert.doesNotMatch(
 		guidelines,
 		/(output|emit|print|render) the questionnaire/i,
 		"the model must not be told to output the questionnaire itself",
 	);
-	assert.doesNotMatch(guidelines, /next message|in your reply/i, "an ordinary reply must not substitute for an answer");
 });
 
 test("a tool call before session_start is an explicit not_initialized error", async () => {
@@ -136,9 +148,10 @@ test("a tool call before session_start is an explicit not_initialized error", as
 	// The honest reason, not a fabricated "no UI in this environment".
 	assert.notEqual(result.details.error?.code, "unsupported_mode");
 	assert.match(result.content[0]!.text, /session_start/);
+	assert.match(result.content[0]!.text, FALLBACK_ADVICE, "not_initialized still advises a text fallback");
 });
 
-test("json and print with no usable UI are an actionable error, not a fallback", async () => {
+test("json and print have no interactive route; the tool text advises an ordinary-text question", async () => {
 	for (const mode of ["json", "print"] as const) {
 		const { tool, handlers } = harness();
 		startSession(handlers, noUICtx(mode));
@@ -148,6 +161,10 @@ test("json and print with no usable UI are an actionable error, not a fallback",
 		assert.equal(result.details.route, undefined, `${mode}: no route is fabricated`);
 		assert.deepEqual(result.details.answers, [], `${mode}: no answers`);
 		assert.match(result.content[0]!.text, /unsupported_mode/, `${mode}: names the failure`);
+		assert.match(result.content[0]!.text, /could not complete the request/i, `${mode}: truthful UI-failure wording`);
+		assert.match(result.content[0]!.text, FALLBACK_ADVICE, `${mode}: advises an ordinary-text question`);
+		assert.match(result.content[0]!.text, /Deploy where\?/, `${mode}: includes the question content`);
+		assert.match(result.content[0]!.text, /staging/, `${mode}: includes the options`);
 	}
 });
 
@@ -161,6 +178,7 @@ test("json and print with an explicit custom mode are configured_unavailable", a
 		assert.equal(result.details.route, "custom", `${mode}: names the requested route`);
 		assert.deepEqual(result.details.answers, [], `${mode}: no answers`);
 		assert.match(result.content[0]!.text, /no other mode will be used/i, `${mode}: states no fallback`);
+		assert.match(result.content[0]!.text, FALLBACK_ADVICE, `${mode}: advises an ordinary-text fallback`);
 	}
 });
 
@@ -172,6 +190,7 @@ test("an invalid programmatic mode is an actionable invalid_config error", async
 	assert.equal(result.details.error?.code, "invalid_config");
 	assert.equal(result.details.route, undefined);
 	assert.match(result.content[0]!.text, /custom, native/);
+	assert.match(result.content[0]!.text, FALLBACK_ADVICE, "invalid_config advises a text fallback");
 });
 
 test("rpc with a dialog-capable client probes to native dialogs", async () => {
@@ -190,7 +209,8 @@ test("a nonresponsive rpc client yields an actionable timeout, never an unsuppor
 	assert.equal(result.details.route, "native");
 	assert.equal(result.details.status, "timeout");
 	assert.notEqual(result.details.error?.code, "unsupported_mode");
-	assert.match(result.content[0]!.text, /timed out/i);
+	assert.match(result.content[0]!.text, /before the deadline/i);
+	assert.doesNotMatch(result.content[0]!.text, FALLBACK_ADVICE, "a timeout must not invite a text re-ask");
 });
 
 test("a tui host with only an input dialog probes to native", async () => {
@@ -241,29 +261,17 @@ test("forcing custom outside a real Pi TUI is a configured_unavailable error", a
 	assert.match(result.content[0]!.text, /no other mode will be used/i);
 });
 
-test("a mode/route parameter cannot change the resolved route", async () => {
+test("unexpected parameter keys are rejected, never routed", async () => {
 	const { tool, handlers } = harness();
 	const ctx = rpcCtx(async () => "2");
 	startSession(handlers, ctx);
-	// `mode`/`route` are ignored on purpose and are never read for routing.
-	const spoofed = {
-		...PARAMS,
-		mode: "custom",
-		route: "custom",
-	};
-	const result = await execute(tool, spoofed, ctx, "call-spoofed");
-	assert.equal(result.details.route, "native", "the probed route must win over any model parameter");
-	assert.equal(result.details.status, "answered");
-});
-
-test("an unexpected parameter key is rejected and cannot change the resolved route", async () => {
-	const { tool, handlers } = harness();
-	const ctx = rpcCtx(async () => "2");
-	startSession(handlers, ctx);
-	const result = await execute(tool, { ...PARAMS, uiMode: "custom" }, ctx, "call-spoof-rejected");
-	assert.equal(result.details.status, "error");
-	assert.equal(result.details.error?.code, "invalid_request");
-	assert.equal(result.details.route, undefined, "a rejected call cannot report a fabricated route");
+	for (const key of ["extra", "uiMode", "mode", "route"] as const) {
+		const result = await execute(tool, { ...PARAMS, [key]: "custom" }, ctx, `call-reject-${key}`);
+		assert.equal(result.details.status, "error", `${key}: rejected`);
+		assert.equal(result.details.error?.code, "invalid_request", `${key}: invalid_request`);
+		assert.equal(result.details.route, undefined, `${key}: no route is fabricated`);
+		assert.doesNotMatch(result.content[0]!.text, FALLBACK_ADVICE, `${key}: unknown input is not a UI failure`);
+	}
 });
 
 test("invalid parameters produce a model-readable error result", async () => {
@@ -274,6 +282,79 @@ test("invalid parameters produce a model-readable error result", async () => {
 	assert.equal(result.details.error?.code, "invalid_request");
 	assert.equal(result.details.route, undefined);
 	assert.match(result.content[0]!.text, /invalid parameters/i);
+	assert.doesNotMatch(result.content[0]!.text, FALLBACK_ADVICE, "an invalid questionnaire is not a UI failure");
+});
+
+test("an empty submitted answer is a non-UI failure with no text fallback or retry advice", async () => {
+	const { tool, handlers } = harness({ mode: "custom" });
+	const ctx = tuiCustomOutcome({
+		kind: "submitted",
+		answers: [{ index: 0, id: "q1", title: "Deploy where?", kind: "single", selections: [], usedDefault: false }],
+	});
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-empty");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "empty_answer");
+	assert.doesNotMatch(result.content[0]!.text, FALLBACK_ADVICE, "empty_answer is not a UI failure");
+	assert.doesNotMatch(result.content[0]!.text, /fix the request/i, "no retry advice for a non-UI failure");
+	assert.match(result.content[0]!.text, /report the failure/i);
+});
+
+test("a custom render failure is reported as custom_ui_failed with a text fallback", async () => {
+	const { tool, handlers } = harness({ mode: "custom" });
+	const ctx = {
+		mode: "tui",
+		hasUI: true,
+		ui: {
+			input: async () => "2",
+			custom: async () => {
+				throw new Error("render blew up");
+			},
+		},
+	} as unknown as ExtensionContext;
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-custom-fail");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "custom_ui_failed");
+	assert.equal(result.details.route, "custom");
+	assert.match(result.content[0]!.text, FALLBACK_ADVICE);
+});
+
+test("a native dialog failure is reported as native_ui_failed with a text fallback", async () => {
+	const { tool, handlers } = harness();
+	const ctx = rpcCtx(async () => {
+		throw new Error("dialog blew up");
+	});
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-native-fail");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "native_ui_failed");
+	assert.equal(result.details.route, "native");
+	assert.match(result.content[0]!.text, FALLBACK_ADVICE);
+});
+
+test("a caller abort is reported with no text fallback", async () => {
+	const { tool, handlers } = harness();
+	const ctx = rpcCtx(async () => "2");
+	startSession(handlers, ctx);
+	const controller = new AbortController();
+	controller.abort();
+	const result = await (tool as unknown as FakeTool).execute("call-abort", PARAMS, controller.signal, undefined, ctx);
+	assert.equal(result.details.status, "aborted");
+	assert.equal(result.details.error, undefined);
+	assert.match(result.content[0]!.text, /aborted/i);
+	assert.doesNotMatch(result.content[0]!.text, FALLBACK_ADVICE, "an abort must not invite a text re-ask");
+});
+
+test("a user dismissal is reported as aborted with no text fallback", async () => {
+	const { tool, handlers } = harness();
+	const ctx = tuiWithCustom(undefined, "\x1b"); // Escape dismisses the custom UI
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-dismiss");
+	assert.equal(result.details.status, "aborted");
+	assert.equal(result.details.error, undefined);
+	assert.match(result.content[0]!.text, /dismissed/i);
+	assert.doesNotMatch(result.content[0]!.text, FALLBACK_ADVICE, "a dismissal must not invite a text re-ask");
 });
 
 test("the host is created once at session_start and reused; later ctx changes do not re-probe", async () => {

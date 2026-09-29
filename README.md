@@ -1,20 +1,22 @@
 # pi-ask-user
 
-`AskUserUI` — a route-resolved "ask the user" interaction for Pi. One tool and
-one reusable TypeScript entry point (`askUser`).
+`AskUser` — a route-resolved "ask the user" interaction for Pi.
 
-A questionnaire is answered through one of two routes, resolved once, when the
-host adapter is created:
+Two entry points share one strict questionnaire contract and one route resolution:
+
+- the registered model-facing tool **`AskUser`**;
+- the host-bound TypeScript API **`createAskUser(ctx)`**, for other extensions.
+
+A questionnaire is answered through one of two routes, resolved once when the host
+is created:
 
 | Route | Runs when | The user sees |
 | --- | --- | --- |
 | `custom` | the host is a real Pi TUI with a bound renderer | a tabbed terminal dialog: options, a pinned free-input row, and a Markdown preview |
 | `native` | `ctx.hasUI` with a callable `ctx.ui.input` (TUI, RPC/ACP) | native input dialogs, one question at a time (invalid input re-prompts) |
 
-The registered tool returns its result to the model as tool output; `askUser`
-called directly resolves to the caller. The route is a property of the host, not
-of a request: a `mode`/`route` value in the input is ignored and cannot influence
-it.
+Only these two routes exist, and the route belongs to the host: it is configured
+or probed when the host is created, never per request.
 
 ## Install
 
@@ -27,9 +29,9 @@ pi --extension ./src/index.ts
 Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`,
 `typebox`.
 
-## Parameters
+## Tool parameters
 
-The registered tool name is exactly **`AskUserUI`**.
+The registered tool name is exactly **`AskUser`**.
 
 | Field | Type | Notes |
 | --- | --- | --- |
@@ -44,15 +46,12 @@ The registered tool name is exactly **`AskUserUI`**.
 | `displayMode` | `"overlay" \| "inline"?` | custom route only; default `overlay` |
 | `timeoutPerQuestionMs` | `number?` | base timeout per question; default `60000` |
 
-These fields are the whole input contract, for the tool and for direct `askUser`
-calls alike. Unknown fields, wrong types, empty ids, and over-long values are
-rejected as `invalid_request`; a `single`/`multi` question without options is an
-error. An explicit `kind: "input"` ignores `options` — if present they are still
-validated, then dropped. Duplicate option labels are de-duplicated and reported
-in `warnings`. Limits: 1–5 questions, ≤5 options each.
-
-There is no `mode`/`route` parameter — the route is resolved by the host. A
-`mode`/`route` key in the input is ignored; any other unexpected key is rejected.
+These fields are the whole input contract, for the tool and for direct calls
+alike. Unknown fields, wrong types, empty ids, and over-long values are rejected
+as `invalid_request`; a `single`/`multi` question without options is an error. An
+explicit `kind: "input"` ignores `options` — if present they are still validated,
+then dropped. Duplicate option labels are de-duplicated and reported in
+`warnings`. Limits: 1–5 questions, ≤5 options each.
 
 ```json
 {
@@ -81,6 +80,8 @@ The route is resolved once, at host creation, from exactly two inputs:
 
 With neither available there is no route and the call is refused with
 `unsupported_mode`; an invalid configured value is refused with `invalid_config`.
+A render failure never silently switches `custom` → `native`: it is reported as
+`custom_ui_failed`/`native_ui_failed`.
 
 `askUserSupport(host)` reports whether — and how — a host can prompt, without
 prompting. It is a discriminated union on `status`:
@@ -92,9 +93,6 @@ prompting. It is a discriminated union on `status`:
 | `no_available_ui` | neither a custom TUI nor native dialogs can run |
 | `invalid_config` | the configured value is not a known route |
 
-`hostCapabilities(host)` is the raw structural probe (are the implementations
-callable); `askUserSupport` applies the configured route on top of it.
-
 With `createPiHost(ctx, { mode })`, `customUI` is bound only in `tui` mode with a
 callable `ctx.ui.custom()`, and `nativeDialogs` only when `ctx.hasUI` and
 `ctx.ui.input` is callable (TUI, RPC). RPC reports `hasUI: true`, so a
@@ -102,32 +100,69 @@ nonresponsive client is not pre-judged: the deadline turns silence into a
 `timeout`. JSON/print have no dialog-capable UI and are refused with
 `unsupported_mode`.
 
-In an extension, `registerAskUserUITool(pi, { mode })` captures the mode at
-registration and builds the host once per session from the context delivered to
+In an extension, `registerAskUser(pi, { mode })` captures the mode at registration
+and builds the host once per session from the context delivered to
 `pi.on("session_start", ...)`, releasing it on `session_shutdown`. A call before
 the session has started fails with `not_initialized`.
 
-## Usage
+## Direct API
+
+For another extension that wants to ask without going through the model, bind the
+interaction to its host and check availability first:
 
 ```ts
-import { askUser, createPiHost, askUserSupport } from "pi-ask-user";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createAskUser } from "pi-ask-user";
 
-const host = createPiHost(ctx);
-const support = askUserSupport(host);
-if (support.status !== "available") {
-  // every non-available state carries an actionable `reason`
-  throw new Error(support.reason);
+async function askWhereToDeploy(ctx: ExtensionContext) {
+  const ask = createAskUser(ctx); // or createAskUser(host), or { mode }
+  if (!ask.isAvailable) {
+    // ask.notAvailableReason explains why, before any UI is shown
+    throw new Error(ask.notAvailableReason ?? "no interactive UI available");
+  }
+
+  const result = await ask({
+    questions: [{ title: "Deploy where?", kind: "single", options: [{ label: "staging" }, { label: "prod" }] }],
+  });
+  // result.status === "answered" | "aborted" | "timeout" | "error"
+  return result;
 }
-const result = await askUser(
-  { questions: [{ title: "Deploy where?", kind: "single", options: [{ label: "staging" }, { label: "prod" }] }] },
-  { host },
-);
 ```
 
-A directly-called `askUser` resolves to the caller and never forwards anything to
-the model by itself; only the registered tool's result is fed back to the model.
-`createAskUserHost({ name, mode, customUI, nativeDialogs })` builds a host
-directly from bound implementations. See [`examples/reuse.ts`](examples/reuse.ts).
+`createAskUser` returns a callable object:
+
+- `ask(request)` → `Promise<AskUserResult>`; it never throws for a bad request or
+  an unavailable host, and it never forwards anything to the model — a direct call
+  belongs to the caller, with no plain-text fallback.
+- `ask.isAvailable` → `true` when the bound host has a ready interactive route
+  (its structural/configured capability, not a promise that a render will succeed).
+- `ask.notAvailableReason` → the reason string when it has none, `undefined` when
+  it has one.
+- `ask.host` → the bound `AskUserHost`.
+
+It accepts a Pi `ExtensionContext` (with an optional `{ mode }`) and probes once,
+or a pre-built `AskUserHost` to reuse one. Availability reflects that host's
+structural + configured state.
+
+## Tool result and model fallback
+
+The tool returns its result to the model as tool output. Its text depends on the
+outcome, and it always tells the model **not to invent an answer**:
+
+- `answered` — the answers.
+- `aborted` / `timeout` — no answer; reported plainly, with no instruction to
+  re-ask in text (the UI may already have been shown, so a text re-ask would
+  prompt the user twice).
+- Interactive UI failed — `unsupported_mode`, `invalid_config`, `not_initialized`,
+  `custom_ui_failed`, `native_ui_failed`: the UI could not complete the request, so
+  the text advises the model to **ask the user the question itself in ordinary
+  text**, including the question and options.
+- Invalid questionnaire — `invalid_request`: a request error, **not** a UI failure;
+  the model is told to fix the call. Other errors (`empty_answer`, `internal`) are
+  reported plainly with no retry instruction.
+
+The ordinary-text advice is tool output only. It is not a route, not an answer,
+and no questionnaire is handed back as if the user had answered it.
 
 ## Results
 
@@ -148,16 +183,15 @@ interface AskUserResult {
 `cancelledReason`. Errors use `empty_answer`, `invalid_request`,
 `custom_ui_failed`, `native_ui_failed`, `invalid_config`, `unsupported_mode`,
 `not_initialized`, or `internal`. `route` is present only when a route ran — or,
-for a refused explicit config, names the requested route. The tool never returns
-an unanswered questionnaire as if it were the user's answer.
+for a refused explicit config, names the requested route.
 
 ## Key constraints
 
 - **The deadline is shared and owned by the core.** Per questionnaire it is
   strictly `timeoutPerQuestionMs × questionCount` (default 60 s each), clamped to
   `MAX_SAFE_TIMEOUT_MS` (2³¹−1); there is no absolute override. The deadline and
-  the caller's cancellation are raced independently of the renderer, so a
-  renderer that never resolves or ignores its `AbortSignal` still yields
+  the caller's cancellation are raced independently of the renderer, so a renderer
+  that never resolves or ignores its `AbortSignal` still yields
   `timeout`/`aborted`; late results are discarded. Cancellation is checked before
   any route branch, so an already-aborted call never renders a UI.
 - **A missing route is an error, not a downgrade.** JSON/print, or an explicit
@@ -165,10 +199,9 @@ an unanswered questionnaire as if it were the user's answer.
   another route.
 - **The native route uses single-line `input`**, one question at a time (not
   `editor`, which accepts no timeout/signal). The number and an optional note
-  share one box:
-  `2`, `2 | note`, or free text; a number list may be comma/space/`，`/`、`
-  separated (`1,3`). Out-of-range or malformed numbers re-prompt, and an empty
-  box is rejected unless the question has a `default`.
+  share one box: `2`, `2 | note`, or free text; a number list may be
+  comma/space/`，`/`、` separated (`1,3`). Out-of-range or malformed numbers
+  re-prompt, and an empty box is rejected unless the question has a `default`.
 - **Tool calls run sequentially** (`executionMode: "sequential"`).
 - **Short terminals degrade in a defined order:** the pinned free-input row and
   the key hints survive first, down to `MIN_USABLE_ROWS` (3); 0 rows renders

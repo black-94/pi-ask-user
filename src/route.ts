@@ -1,9 +1,9 @@
 import { isUIMode } from "./mode.ts";
 import type {
 	AskUserHost,
-	AskUserUIMode,
+	AskUserMode,
 	AskUserRoute,
-	AskUserUISupport,
+	AskUserSupport,
 	CustomUIRenderer,
 	HostCapabilities,
 	HostImplementations,
@@ -48,7 +48,7 @@ export function probeRoutes(capabilities: HostCapabilities): AskUserRoute[] {
  *  3. with nothing available, the result is `no_available_ui` — no route is
  *     fabricated.
  */
-export function resolveSupport(mode: AskUserUIMode | undefined, capabilities: HostCapabilities): AskUserUISupport {
+export function resolveSupport(mode: AskUserMode | undefined, capabilities: HostCapabilities): AskUserSupport {
 	const available = probeRoutes(capabilities);
 	if (mode !== undefined) {
 		if (!isUIMode(mode)) {
@@ -90,7 +90,7 @@ export interface CreateAskUserHostOptions {
 	/** Human-readable adapter name, used in diagnostics. */
 	name: string;
 	/** Explicit UI route. When omitted, the route is probed from the implementations below. */
-	mode?: AskUserUIMode;
+	mode?: AskUserMode;
 	customUI?: CustomUIRenderer;
 	nativeDialogs?: NativeDialogRunner;
 }
@@ -115,6 +115,6 @@ export function createAskUserHost(options: CreateAskUserHostOptions): AskUserHos
  * value resolved at host creation, so callers can decide up front whether a
  * request would be serviced, refused, or impossible — and through which route.
  */
-export function askUserSupport(host: AskUserHost): AskUserUISupport {
+export function askUserSupport(host: AskUserHost): AskUserSupport {
 	return host.support;
 }

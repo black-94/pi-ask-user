@@ -1,6 +1,6 @@
 import type { ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { createAskUserHost, type CreateAskUserHostOptions } from "../route.ts";
-import type { AskUIInput, AskUIOutcome, AskUserHost, AskUserUIMode, CustomUIRenderer } from "../types.ts";
+import type { AskUIInput, AskUIOutcome, AskUserHost, AskUserMode, CustomUIRenderer } from "../types.ts";
 import { AskUserComponent, type AskUserTheme, type CustomUIResult } from "../ui/custom.ts";
 import { createNativeRunner } from "../ui/native.ts";
 
@@ -10,7 +10,7 @@ export interface PiHostOptions {
 	 * omitted, the route is probed from the implementations this context really
 	 * supports. An invalid value is reported as `invalid_config`.
 	 */
-	mode?: AskUserUIMode;
+	mode?: AskUserMode;
 }
 
 /**
@@ -24,10 +24,11 @@ export interface PiHostOptions {
  * Both implementations are bound wherever they can really run:
  *
  *  - `customUI`      — only in `tui` mode with a callable `ctx.ui.custom()`.
- *  - `nativeDialogs` — only when `ctx.hasUI` and `ctx.ui.input` is callable, i.e.
- *    one native input dialog per question. RPC reports `hasUI: true`, so a
- *    nonresponsive RPC client is *not* pre-judged: the attempt is made and the
- *    shared deadline turns silence into an actionable `timeout`.
+ *  - `nativeDialogs` — only when `ctx.hasUI` and `ctx.ui.input` is callable,
+ *    i.e. native input dialogs shown one question at a time. RPC reports
+ *    `hasUI: true`, so a nonresponsive RPC client is *not* pre-judged: the
+ *    attempt is made and the shared deadline turns silence into an actionable
+ *    `timeout`.
  *
  * The route is then resolved once (explicit `mode`, else the probe with `custom`
  * preferred, else unsupported) and stored on the host. JSON/print have no

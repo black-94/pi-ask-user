@@ -15,17 +15,11 @@ export const LIMITS = {
 	header: 200,
 } as const;
 
-const QUESTION_KINDS = ["single", "multi", "input"] as const;
 const ID_MAX_LENGTH = 64;
+const QUESTION_KINDS = ["single", "multi", "input"] as const;
 const QUESTION_FIELDS = ["id", "title", "prompt", "kind", "options", "default"] as const;
 const OPTION_FIELDS = ["label", "description", "preview"] as const;
 const REQUEST_FIELDS = ["questions", "header", "displayMode", "timeoutPerQuestionMs"] as const;
-/**
- * Model input may carry a routing key. It is never read, so it cannot influence
- * the route; it is ignored rather than rejected so a stray `mode`/`route` does
- * not fail an otherwise valid questionnaire.
- */
-const IGNORED_REQUEST_FIELDS = ["mode", "route"] as const;
 
 /**
  * Flat string enum. Emitted as `{ type: "string", enum: [...] }` because some
@@ -51,15 +45,14 @@ const QuestionSchema = Type.Object({
 });
 
 /**
- * Parameter schema registered for the `AskUserUI` tool, and the single input
- * contract for direct {@link askUser} calls too. Only these fields and types are
- * read; anything else is rejected as `invalid_request` rather than coerced.
+ * Parameter schema registered for the `AskUser` tool, and the single input
+ * contract for direct `askUser` calls too. Only these fields and types are read;
+ * anything else is rejected as `invalid_request` rather than coerced.
  *
- * It deliberately carries no UI-route field: the route is resolved by the host
- * adapter from an explicit `mode` or an initialisation-time capability probe,
- * never by the model. A `mode`/`route` key in the input is ignored, never read.
+ * The UI route is host configuration, resolved by the host adapter — it is never
+ * part of a request.
  */
-export const AskUserUIParams = Type.Object({
+export const AskUserParams = Type.Object({
 	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: MAX_QUESTIONS }),
 	header: Type.Optional(Type.String({ maxLength: LIMITS.header })),
 	displayMode: Type.Optional(StringEnum(["overlay", "inline"] as const)),
@@ -201,11 +194,10 @@ function readTimeoutPerQuestionMs(value: unknown): number {
 	return Math.floor(value);
 }
 
-/** Normalize and validate a request against the {@link AskUserUIParams} contract. */
+/** Normalize and validate a request against the {@link AskUserParams} contract. */
 export function normalizeAskUserRequest(raw: unknown): { request: NormalizedRequest; warnings: string[] } {
 	if (!isRecord(raw)) throw new AskUserValidationError("Missing the questions array.");
 	for (const key of Object.keys(raw)) {
-		if (IGNORED_REQUEST_FIELDS.includes(key as (typeof IGNORED_REQUEST_FIELDS)[number])) continue;
 		if (!REQUEST_FIELDS.includes(key as (typeof REQUEST_FIELDS)[number])) {
 			throw new AskUserValidationError(`Unknown field "${key}".`);
 		}

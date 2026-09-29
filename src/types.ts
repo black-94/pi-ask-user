@@ -1,11 +1,12 @@
 /**
- * Public types for AskUserUI.
+ * Public types for AskUser.
  *
- * AskUserUI is a host-adaptive "ask the user" interaction primitive. A request
- * is answered through one of two routes:
+ * AskUser is a host-adaptive "ask the user" interaction primitive. A request is
+ * answered through one of two routes:
  *
  *  - `custom` — a custom terminal UI (only a real Pi TUI)
- *  - `native` — one native input dialog per question (`ctx.hasUI` + callable input)
+ *  - `native` — native input dialogs (`ctx.hasUI` + callable input), one question
+ *    at a time
  *
  * The route is resolved **once, when the host adapter is created**, from
  * trustworthy inputs only:
@@ -97,10 +98,11 @@ export interface AskUserAnswer {
 export type AskUserStatus = "answered" | "aborted" | "timeout" | "error";
 export type AskUserRoute = "custom" | "native";
 /**
- * The configured UI route: the same two values as {@link AskUserRoute}.
- * Configuration never falls back — an unsupported value is an error.
+ * The configured route a host is asked to use: the same two values as
+ * {@link AskUserRoute}. Configuration never falls back — an unsupported value is
+ * an error.
  */
-export type AskUserUIMode = AskUserRoute;
+export type AskUserMode = AskUserRoute;
 export type AskUserErrorCode =
 	| "invalid_request"
 	| "custom_ui_failed"
@@ -163,7 +165,7 @@ export interface HostImplementations {
  * priority order with `custom` first. `route` is present only when a request
  * will actually be serviced — never a fabricated default.
  */
-export interface AskUserUISupportAvailable {
+export interface AskUserSupportAvailable {
 	status: "available";
 	/** The route a request will be serviced through. */
 	route: AskUserRoute;
@@ -174,7 +176,7 @@ export interface AskUserUISupportAvailable {
 }
 
 /** An explicit mode was configured but cannot run here. No fallback is taken. */
-export interface AskUserUISupportConfiguredUnavailable {
+export interface AskUserSupportConfiguredUnavailable {
 	status: "configured_unavailable";
 	/** The explicitly configured route, which cannot run in this environment. */
 	configured: AskUserRoute;
@@ -184,7 +186,7 @@ export interface AskUserUISupportConfiguredUnavailable {
 }
 
 /** Nothing can run here: neither a custom TUI nor native dialogs. */
-export interface AskUserUISupportNoUI {
+export interface AskUserSupportNoUI {
 	status: "no_available_ui";
 	capabilities: HostCapabilities;
 	available: [];
@@ -192,7 +194,7 @@ export interface AskUserUISupportNoUI {
 }
 
 /** The configured value is not a known route. */
-export interface AskUserUISupportInvalidConfig {
+export interface AskUserSupportInvalidConfig {
 	status: "invalid_config";
 	capabilities: HostCapabilities;
 	/** What could run here, had the configuration been valid. */
@@ -205,11 +207,11 @@ export interface AskUserUISupportInvalidConfig {
  * user right now, without actually prompting. Narrow on `status`: the `route`
  * field exists only for `"available"`.
  */
-export type AskUserUISupport =
-	| AskUserUISupportAvailable
-	| AskUserUISupportConfiguredUnavailable
-	| AskUserUISupportNoUI
-	| AskUserUISupportInvalidConfig;
+export type AskUserSupport =
+	| AskUserSupportAvailable
+	| AskUserSupportConfiguredUnavailable
+	| AskUserSupportNoUI
+	| AskUserSupportInvalidConfig;
 
 /** Shared input passed to custom/native renderers. */
 export interface AskUIInput {
@@ -250,7 +252,7 @@ export interface AskUserHost {
 	 * and the bound implementations. The core honours it verbatim: it never
 	 * re-selects a route per request.
 	 */
-	support: AskUserUISupport;
+	support: AskUserSupport;
 	/** Bound wherever the custom route can really run. */
 	customUI?: CustomUIRenderer;
 	/** Bound wherever the native route can really run. */

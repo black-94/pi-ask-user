@@ -207,13 +207,14 @@ test("carries defaults and marks hasDefault", () => {
 	assert.equal(request.questions[0]!.default, "b");
 });
 
-test("ignores a mode/route key so it cannot influence anything", () => {
-	const { request } = normalizeAskUserRequest({
-		questions: [{ title: "Q", options: [{ label: "a" }] }],
-		mode: "custom",
-		route: "custom",
-	});
-	assert.equal(request.questions[0]!.kind, "single");
+test("rejects extra unknown fields at the top level", () => {
+	for (const key of ["extra", "uiMode", "title"] as const) {
+		assert.throws(
+			() => normalizeAskUserRequest({ questions: [{ title: "Q", options: [{ label: "a" }] }], [key]: "x" }),
+			AskUserValidationError,
+			key,
+		);
+	}
 });
 
 test("MAX_QUESTIONS constant matches the schema limit", () => {

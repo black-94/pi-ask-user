@@ -4,7 +4,7 @@ import type {
 	AskUIInput,
 	AskUIOutcome,
 	AskUserResult,
-	AskUserUISupport,
+	AskUserSupport,
 	AskUserOptions,
 	NormalizedRequest,
 } from "./types.ts";
@@ -178,7 +178,7 @@ function raceWithDeadline(
  * route; an environment with no usable UI reports `unsupported_mode` with no
  * route at all, so no default is ever fabricated.
  */
-function supportErrorResult(support: Exclude<AskUserUISupport, { status: "available" }>): AskUserResult {
+function supportErrorResult(support: Exclude<AskUserSupport, { status: "available" }>): AskUserResult {
 	if (support.status === "invalid_config") {
 		return { status: "error", answers: [], error: { code: "invalid_config", message: support.reason } };
 	}
