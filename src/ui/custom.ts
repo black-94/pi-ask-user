@@ -82,9 +82,9 @@ function buildMarkdownTheme(theme: AskUserTheme): MarkdownTheme {
 }
 
 function placeholderFor(question: NormalizedQuestion): string {
-	if (question.kind === "input") return "输入你的回答";
-	if (question.hasDefault) return "可选：补充说明或直接回车使用默认值";
-	return "可选：补充说明";
+	if (question.kind === "input") return "Type your answer";
+	if (question.hasDefault) return "Optional: add a note, or press Enter to use the default";
+	return "Optional: add a note";
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -451,7 +451,7 @@ export class AskUserComponent implements Component, Focusable {
 		const question = this.currentQuestion();
 		const fallback = draftFromDefault(question);
 		if (!fallback) {
-			this.notice = "该题没有默认值，必须作答。";
+			this.notice = "This question has no default and is required.";
 			this.refresh();
 			return;
 		}
@@ -467,7 +467,7 @@ export class AskUserComponent implements Component, Focusable {
 		this.syncDraftFromInput(this.tab);
 		const draft = this.drafts[this.tab]!;
 		if (draftIsEmpty(draft) && !question.hasDefault) {
-			this.notice = "这是必答题：请选择选项或输入文本。";
+			this.notice = "This question is required: select an option or type text.";
 			this.refresh();
 			return;
 		}
@@ -505,7 +505,7 @@ export class AskUserComponent implements Component, Focusable {
 			const first = unanswered[0]!;
 			this.tab = first;
 			this.cursors[first] = 0;
-			this.notice = `第 ${first + 1} 题还没有答案，请先作答。`;
+			this.notice = `Question ${first + 1} has no answer yet; answer it first.`;
 			this.resetScroll();
 			this.refresh();
 			return;
@@ -564,7 +564,7 @@ export class AskUserComponent implements Component, Focusable {
 			);
 		});
 		if (this.hasReview) {
-			const chip = "✓ 提交";
+			const chip = "✓ Submit";
 			chips.push(
 				this.isReview ? inverse(this.theme.fg("accent", ` ${chip} `)) : this.theme.fg("muted", ` ${chip} `),
 			);
@@ -652,7 +652,7 @@ export class AskUserComponent implements Component, Focusable {
 		if (preview.trim() !== "") {
 			lines.push("");
 			lines.push(this.theme.fg("border", "─".repeat(width)));
-			lines.push(this.theme.fg("muted", "预览："));
+			lines.push(this.theme.fg("muted", "Preview:"));
 			lines.push(...this.markdownFor(preview).render(width));
 		}
 		const maxScroll = Math.max(0, lines.length - height);
@@ -674,7 +674,7 @@ export class AskUserComponent implements Component, Focusable {
 	}
 
 	private renderSubmitBar(width: number): string[] {
-		return [truncateToWidth(this.theme.fg("accent", "  [ Enter 提交 ]"), width)];
+		return [truncateToWidth(this.theme.fg("accent", "  [ Enter Submit ]"), width)];
 	}
 
 	private renderReview(width: number): string[] {
@@ -695,25 +695,25 @@ export class AskUserComponent implements Component, Focusable {
 			parts.push(draft.selections.map((index) => question.options[index]?.label ?? `#${index + 1}`).join(", "));
 		}
 		const freeText = draft.freeText.trim();
-		if (freeText !== "") parts.push(`“${freeText}”`);
+		if (freeText !== "") parts.push(`"${freeText}"`);
 		if (parts.length === 0) {
 			const fallback = draftFromDefault(question);
-			if (fallback) return `将使用默认值：${question.default}`;
-			return "（未作答）";
+			if (fallback) return `Will use the default: ${question.default}`;
+			return "(unanswered)";
 		}
-		const suffix = draft.usedDefault ? "（默认值）" : "";
+		const suffix = draft.usedDefault ? " (default)" : "";
 		return parts.join(" | ") + suffix;
 	}
 
 	private hintLine(): string {
-		if (this.isReview) return this.theme.fg("dim", "Enter 提交 · Tab 切换问题 · Esc 取消");
+		if (this.isReview) return this.theme.fg("dim", "Enter submit · Tab switch question · Esc cancel");
 		const question = this.currentQuestion();
-		const hints = ["Tab 切换", "↑/↓ 移动", `Enter ${this.isInputRow() ? "确认" : "选择"}`];
-		if (question.kind === "multi") hints.push("空格 多选");
-		if (question.hasDefault) hints.push("s 用默认值");
-		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn 预览");
-		if (this.isInputRow() && question.options.length > 0) hints.push("↑ 回选项");
-		hints.push("Esc 取消");
+		const hints = ["Tab switch", "↑/↓ move", `Enter ${this.isInputRow() ? "confirm" : "select"}`];
+		if (question.kind === "multi") hints.push("Space multi-select");
+		if (question.hasDefault) hints.push("s use default");
+		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn preview");
+		if (this.isInputRow() && question.options.length > 0) hints.push("↑ back to options");
+		hints.push("Esc cancel");
 		return this.theme.fg("dim", hints.join(" · "));
 	}
 
@@ -731,7 +731,7 @@ export class AskUserComponent implements Component, Focusable {
 		// Fixed blocks, with the free-input row and key hints guaranteed highest
 		// priority so they survive a short terminal.
 		const titleText = this.isReview
-			? "提交前确认"
+			? "Review before submitting"
 			: `${this.currentQuestion().index + 1}/${this.request.questions.length}. ${this.currentQuestion().title}`;
 		const titleBlock = this.wrap(this.theme.bold(this.theme.fg("accent", titleText)), lineWidth).slice(
 			0,
@@ -770,9 +770,4 @@ export class AskUserComponent implements Component, Focusable {
 		this.cachedLines = finalLines;
 		return finalLines;
 	}
-}
-
-/** Build a submitted answer purely from drafts (used by tests and callers). */
-export function answersFromDrafts(questions: NormalizedQuestion[], drafts: DraftAnswer[]): AskUserAnswer[] {
-	return finalizeAnswers(questions, drafts).answers;
 }

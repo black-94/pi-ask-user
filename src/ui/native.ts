@@ -14,11 +14,11 @@ export interface NativeDialogUI {
 function placeholderFor(question: NormalizedQuestion): string {
 	switch (question.kind) {
 		case "single":
-			return question.options.length > 0 ? "例如 2 或 “2 | 补充说明” 或直接输入文本" : "直接输入文本";
+			return question.options.length > 0 ? 'e.g. 2 or "2 | note" or type free text' : "type free text";
 		case "multi":
-			return question.options.length > 0 ? "例如 1,3 或 “1,3 | 补充说明” 或直接输入文本" : "直接输入文本";
+			return question.options.length > 0 ? 'e.g. 1,3 or "1,3 | note" or type free text' : "type free text";
 		case "input":
-			return "直接输入文本";
+			return "type free text";
 	}
 }
 
@@ -30,18 +30,18 @@ function buildPrompt(
 	const total = request.questions.length;
 	const lines: string[] = [];
 	if (request.header && request.header.trim() !== "") lines.push(request.header.trim());
-	lines.push(`【问题 ${question.index + 1}/${total}】${question.title}`);
+	lines.push(`[Question ${question.index + 1}/${total}] ${question.title}`);
 	if (question.prompt && question.prompt.trim() !== "") lines.push(question.prompt.trim());
 	question.options.forEach((option, index) => {
 		const description = option.description?.trim();
 		lines.push(`  ${index + 1}. ${option.label}${description ? ` — ${description}` : ""}`);
 	});
 	if (question.hasDefault && question.default !== undefined) {
-		lines.push(`默认值：${question.default}（留空回车即使用默认值）`);
+		lines.push(`Default: ${question.default} (press Enter on an empty box to use it)`);
 	}
 	lines.push(nativeInputHint(question));
 	const body = lines.join("\n");
-	if (invalid) return `⚠ 输入无效：${invalid}\n\n${body}`;
+	if (invalid) return `⚠ Invalid input: ${invalid}\n\n${body}`;
 	return body;
 }
 
@@ -61,7 +61,7 @@ export function createNativeRunner(ui: NativeDialogUI): NativeDialogRunner {
 				let invalid: string | undefined;
 				for (;;) {
 					if (deadline.expired()) return { kind: "timeout" };
-					onUpdate?.(`等待用户回答第 ${question.index + 1}/${total} 题…`);
+					onUpdate?.(`Waiting for the user to answer question ${question.index + 1}/${total}…`);
 					const remaining = deadline.remainingMs();
 					const opts: { signal?: AbortSignal; timeout?: number } = { timeout: remaining };
 					if (signal) opts.signal = signal;
@@ -92,8 +92,8 @@ export function createNativeRunner(ui: NativeDialogUI): NativeDialogRunner {
 						}
 						invalid =
 							question.kind === "input"
-								? "这是必答题，不能为空。"
-								: "这是必答题，请输入编号或直接输入文本。";
+								? "This question is required and cannot be empty."
+								: "This question is required; enter an option number or free text.";
 						continue;
 					}
 					answers.push(

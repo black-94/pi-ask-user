@@ -51,13 +51,13 @@ test("single: pipe with no number is treated as free input", () => {
 test("single: multiple numbers are rejected", () => {
 	const outcome = parseNativeAnswer(single, "1,2");
 	assert.equal(outcome.ok, false);
-	if (!outcome.ok) assert.match(outcome.error, /单选/);
+	if (!outcome.ok) assert.match(outcome.error, /single-select/i);
 });
 
 test("single: out-of-range number is rejected", () => {
 	const outcome = parseNativeAnswer(single, "9");
 	assert.equal(outcome.ok, false);
-	if (!outcome.ok) assert.match(outcome.error, /越界/);
+	if (!outcome.ok) assert.match(outcome.error, /out of range/i);
 });
 
 test("single: zero is rejected as out of range", () => {
@@ -68,13 +68,13 @@ test("single: zero is rejected as out of range", () => {
 test("single: malformed number-like input is rejected", () => {
 	const outcome = parseNativeAnswer(single, "1.5");
 	assert.equal(outcome.ok, false);
-	if (!outcome.ok) assert.match(outcome.error, /编号无效/);
+	if (!outcome.ok) assert.match(outcome.error, /invalid number/i);
 });
 
 test("single: `1,a` is a malformed number list, not free text", () => {
 	const outcome = parseNativeAnswer(single, "1,a");
 	assert.equal(outcome.ok, false);
-	if (!outcome.ok) assert.match(outcome.error, /编号无效/);
+	if (!outcome.ok) assert.match(outcome.error, /invalid number/i);
 });
 
 test("single: `2, please` is a malformed number list", () => {
@@ -143,7 +143,7 @@ test("empty input is reported as empty", () => {
 });
 
 test("input hint depends on question kind", () => {
-	assert.match(nativeInputHint(single), /编号/);
-	assert.match(nativeInputHint(multi), /逗号/);
-	assert.match(nativeInputHint(input), /文本/);
+	assert.match(nativeInputHint(single), /number/);
+	assert.match(nativeInputHint(multi), /commas/i);
+	assert.match(nativeInputHint(input), /text/i);
 });

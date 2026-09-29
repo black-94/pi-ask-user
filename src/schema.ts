@@ -1,4 +1,4 @@
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
 import type { AskUserOption, AskUserQuestion, NormalizedQuestion, NormalizedRequest, QuestionKind } from "./types.ts";
 
 export const MAX_QUESTIONS = 5;
@@ -15,6 +15,18 @@ export const LIMITS = {
 	header: 200,
 } as const;
 
+const QUESTION_KINDS = ["single", "multi", "input"] as const;
+const ID_MAX_LENGTH = 64;
+const QUESTION_FIELDS = ["id", "title", "prompt", "kind", "options", "default"] as const;
+const OPTION_FIELDS = ["label", "description", "preview"] as const;
+const REQUEST_FIELDS = ["questions", "header", "displayMode", "timeoutPerQuestionMs"] as const;
+/**
+ * Model input may carry a routing key. It is never read, so it cannot influence
+ * the route; it is ignored rather than rejected so a stray `mode`/`route` does
+ * not fail an otherwise valid questionnaire.
+ */
+const IGNORED_REQUEST_FIELDS = ["mode", "route"] as const;
+
 /**
  * Flat string enum. Emitted as `{ type: "string", enum: [...] }` because some
  * provider proxies reject `anyOf`/`union` shapes.
@@ -30,20 +42,22 @@ const OptionSchema = Type.Object({
 });
 
 const QuestionSchema = Type.Object({
-	id: Type.Optional(Type.String({ maxLength: 64 })),
+	id: Type.Optional(Type.String({ minLength: 1, maxLength: ID_MAX_LENGTH })),
 	title: Type.String({ minLength: 1, maxLength: LIMITS.title }),
 	prompt: Type.Optional(Type.String({ maxLength: LIMITS.prompt })),
-	kind: Type.Optional(StringEnum(["single", "multi", "input"] as const)),
+	kind: Type.Optional(StringEnum(QUESTION_KINDS)),
 	options: Type.Optional(Type.Array(OptionSchema, { maxItems: MAX_OPTIONS })),
 	default: Type.Optional(Type.String({ maxLength: LIMITS.defaultValue })),
 });
 
 /**
- * Parameter schema registered for the `AskUserUI` tool.
+ * Parameter schema registered for the `AskUserUI` tool, and the single input
+ * contract for direct {@link askUser} calls too. Only these fields and types are
+ * read; anything else is rejected as `invalid_request` rather than coerced.
  *
- * It deliberately carries no UI-mode field: the route is chosen by host
- * configuration (programmatic `mode` > `PI_ASK_USER_UI_MODE` > `native`), never
- * by the model.
+ * It deliberately carries no UI-route field: the route is resolved by the host
+ * adapter from an explicit `mode` or an initialisation-time capability probe,
+ * never by the model. A `mode`/`route` key in the input is ignored, never read.
  */
 export const AskUserUIParams = Type.Object({
 	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: MAX_QUESTIONS }),
@@ -51,8 +65,6 @@ export const AskUserUIParams = Type.Object({
 	displayMode: Type.Optional(StringEnum(["overlay", "inline"] as const)),
 	timeoutPerQuestionMs: Type.Optional(Type.Number({ minimum: 0 })),
 });
-
-export type AskUserUIParamsType = Static<typeof AskUserUIParams>;
 
 export class AskUserValidationError extends Error {
 	readonly code = "invalid_request";
@@ -63,158 +75,156 @@ export class AskUserValidationError extends Error {
 	}
 }
 
-function asString(value: unknown): string | undefined {
-	if (typeof value === "string") return value;
-	if (typeof value === "number" || typeof value === "boolean") return String(value);
-	return undefined;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
-	for (const key of keys) {
-		const value = asString(record[key]);
-		if (value !== undefined && value.trim() !== "") return value;
+/** Reject any field that is not part of the declared contract. */
+function assertKnownKeys(record: Record<string, unknown>, allowed: readonly string[], where: string): void {
+	for (const key of Object.keys(record)) {
+		if (!allowed.includes(key)) throw new AskUserValidationError(`${where} has an unknown field "${key}".`);
 	}
-	return undefined;
 }
 
-function toKind(value: unknown): QuestionKind | undefined {
-	const raw = asString(value)?.trim().toLowerCase();
-	if (raw === "single" || raw === "multi" || raw === "input") return raw;
-	if (raw === "multiple" || raw === "multiselect" || raw === "multi-select") return "multi";
-	if (raw === "text" || raw === "freeform" || raw === "free") return "input";
-	return undefined;
+/** A required, non-empty, length-bounded string; returns the trimmed value. */
+function requireText(value: unknown, where: string, maxLength: number): string {
+	if (typeof value !== "string") throw new AskUserValidationError(`${where} must be a string.`);
+	const text = value.trim();
+	if (text === "") throw new AskUserValidationError(`${where} must not be empty.`);
+	if (text.length > maxLength) throw new AskUserValidationError(`${where} exceeds the ${maxLength}-character limit.`);
+	return text;
 }
 
-/** Coerce a model option (string or object with common alias keys) into an option. */
-export function coerceOption(value: unknown): AskUserOption | undefined {
-	if (typeof value === "string") {
-		const label = value.trim();
-		return label === "" ? undefined : { label };
-	}
-	if (!isRecord(value)) return undefined;
-	const label = firstString(value, ["label", "title", "value", "text", "name", "option"]);
-	if (!label) return undefined;
+/** An optional, length-bounded string; absent stays absent. */
+function optionalText(value: unknown, where: string, maxLength: number): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new AskUserValidationError(`${where} must be a string.`);
+	if (value.length > maxLength) throw new AskUserValidationError(`${where} exceeds the ${maxLength}-character limit.`);
+	return value;
+}
+
+function optionalQuestionId(value: unknown, where: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string") throw new AskUserValidationError(`${where} "id" must be a string.`);
+	const id = value.trim();
+	if (id === "") throw new AskUserValidationError(`${where} "id" must not be empty.`);
+	if (id.length > ID_MAX_LENGTH) throw new AskUserValidationError(`${where} "id" exceeds the ${ID_MAX_LENGTH}-character limit.`);
+	return id;
+}
+
+/** A canonical option object: `{ label, description?, preview? }`. */
+function readOption(value: unknown, where: string, position: number): AskUserOption {
+	const at = `${where} option ${position + 1}`;
+	if (!isRecord(value)) throw new AskUserValidationError(`${at} must be an object with a "label".`);
+	assertKnownKeys(value, OPTION_FIELDS, at);
+	const label = requireText(value.label, `${at} label`, LIMITS.label);
 	const option: AskUserOption = { label };
-	const description = firstString(value, ["description", "desc", "detail", "details", "help", "hint"]);
-	if (description) option.description = description;
-	const preview = firstString(value, ["preview", "markdown", "body", "content"]);
-	if (preview) option.preview = preview;
+	const description = optionalText(value.description, `${at} description`, LIMITS.description);
+	if (description !== undefined) option.description = description;
+	const preview = optionalText(value.preview, `${at} preview`, LIMITS.preview);
+	if (preview !== undefined) option.preview = preview;
 	return option;
 }
 
-function coerceQuestion(value: unknown, index: number): { question: AskUserQuestion; warnings: string[] } {
+function readQuestion(value: unknown, index: number): { question: AskUserQuestion; warnings: string[] } {
 	const warnings: string[] = [];
-	if (typeof value === "string") {
-		return { question: { title: value.trim(), kind: "input" }, warnings };
-	}
-	if (!isRecord(value)) {
-		throw new AskUserValidationError(`问题 ${index + 1} 不是有效的对象或字符串。`);
-	}
-	const title = firstString(value, ["title", "question", "header", "label", "text", "prompt"]) ?? "";
-	const prompt = firstString(value, ["prompt", "description", "desc", "context", "note", "detail"]);
-	const rawOptions = Array.isArray(value.options)
-		? value.options
-		: Array.isArray(value.choices)
-			? value.choices
-			: undefined;
-	const options = rawOptions ? rawOptions.map(coerceOption).filter((option): option is AskUserOption => !!option) : [];
-	if (rawOptions && options.length < rawOptions.length) {
-		warnings.push(`问题 ${index + 1} 有 ${rawOptions.length - options.length} 个无效选项被忽略。`);
-	}
-	let kind = toKind(value.kind) ?? toKind(value.type);
-	if (!kind) {
-		if (options.length === 0) {
-			kind = "input";
-		} else {
-			const multiple =
-				value.allowMultiple === true || value.multiSelect === true || value.multiple === true || value.multi === true;
-			kind = multiple ? "multi" : "single";
+	const where = `Question ${index + 1}`;
+	if (!isRecord(value)) throw new AskUserValidationError(`${where} must be an object.`);
+	assertKnownKeys(value, QUESTION_FIELDS, where);
+
+	const title = requireText(value.title, `${where} title`, LIMITS.title);
+
+	let kind: QuestionKind | undefined;
+	if (value.kind !== undefined) {
+		if (typeof value.kind !== "string" || !QUESTION_KINDS.includes(value.kind as QuestionKind)) {
+			throw new AskUserValidationError(`${where} "kind" must be "single", "multi", or "input".`);
 		}
+		kind = value.kind as QuestionKind;
 	}
-	const question: AskUserQuestion = { title, kind };
-	if (prompt) question.prompt = prompt;
-	if (kind !== "input" && options.length > 0) question.options = options;
-	const id = firstString(value, ["id"]);
-	if (id) question.id = id;
-	const defaultValue = firstString(value, ["default", "defaultValue", "default_value", "preset"]);
-	if (defaultValue !== undefined) question.default = defaultValue;
+
+	const rawOptions = value.options;
+	if (rawOptions !== undefined && !Array.isArray(rawOptions)) {
+		throw new AskUserValidationError(`${where} "options" must be an array.`);
+	}
+	const rawOptionList = rawOptions ?? [];
+	if (rawOptionList.length > MAX_OPTIONS) {
+		throw new AskUserValidationError(`${where} has more than ${MAX_OPTIONS} options.`);
+	}
+
+	const options: AskUserOption[] = [];
+	const seen = new Set<string>();
+	rawOptionList.forEach((rawOption, position) => {
+		const option = readOption(rawOption, where, position);
+		if (seen.has(option.label)) {
+			warnings.push(`${where} has a duplicate option "${option.label}"; de-duplicated.`);
+			return;
+		}
+		seen.add(option.label);
+		options.push(option);
+	});
+
+	// When `kind` is omitted it is inferred from `options`: present ⇒ `single`,
+	// absent ⇒ `input`. `multi` is only ever explicit.
+	if (kind === undefined) kind = options.length > 0 ? "single" : "input";
 	if (kind !== "input" && options.length === 0) {
-		warnings.push(`问题 ${index + 1} 是选择题但没有有效选项，已按自由输入处理。`);
-		question.kind = "input";
+		throw new AskUserValidationError(`${where} is a "${kind}" question but has no options.`);
 	}
+
+	const question: AskUserQuestion = { title, kind };
+	const prompt = optionalText(value.prompt, `${where} prompt`, LIMITS.prompt);
+	if (prompt !== undefined) question.prompt = prompt;
+	if (kind === "input") {
+		delete question.options;
+	} else {
+		question.options = options;
+	}
+	const id = optionalQuestionId(value.id, where);
+	if (id) question.id = id;
+	const fallback = optionalText(value.default, `${where} default`, LIMITS.defaultValue);
+	if (fallback !== undefined) question.default = fallback;
 	return { question, warnings };
 }
 
-function unwrapQuestions(raw: unknown): unknown[] {
-	if (Array.isArray(raw)) return raw;
-	if (isRecord(raw)) {
-		if (Array.isArray(raw.questions)) return raw.questions;
-		if (Array.isArray(raw.items)) return raw.items;
-		if (typeof raw.question === "string") return [raw];
+function readDisplayMode(value: unknown): "overlay" | "inline" {
+	if (value === undefined) return "overlay";
+	if (value !== "overlay" && value !== "inline") {
+		throw new AskUserValidationError('displayMode must be "overlay" or "inline".');
 	}
-	throw new AskUserValidationError("缺少 questions 数组。");
+	return value;
 }
 
-/** Normalize arbitrary (usually model-produced) input into a validated request. */
-export function normalizeAskUserRequest(raw: unknown): { request: NormalizedRequest; warnings: string[] } {
-	const warnings: string[] = [];
-	const container = isRecord(raw) ? raw : {};
-	const rawQuestions = unwrapQuestions(raw);
-	if (rawQuestions.length === 0) {
-		throw new AskUserValidationError("至少需要 1 个问题。");
+function readTimeoutPerQuestionMs(value: unknown): number {
+	if (value === undefined) return DEFAULT_TIMEOUT_PER_QUESTION_MS;
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+		throw new AskUserValidationError("timeoutPerQuestionMs must be a non-negative finite number.");
 	}
+	return Math.floor(value);
+}
+
+/** Normalize and validate a request against the {@link AskUserUIParams} contract. */
+export function normalizeAskUserRequest(raw: unknown): { request: NormalizedRequest; warnings: string[] } {
+	if (!isRecord(raw)) throw new AskUserValidationError("Missing the questions array.");
+	for (const key of Object.keys(raw)) {
+		if (IGNORED_REQUEST_FIELDS.includes(key as (typeof IGNORED_REQUEST_FIELDS)[number])) continue;
+		if (!REQUEST_FIELDS.includes(key as (typeof REQUEST_FIELDS)[number])) {
+			throw new AskUserValidationError(`Unknown field "${key}".`);
+		}
+	}
+	const rawQuestions = raw.questions;
+	if (!Array.isArray(rawQuestions)) throw new AskUserValidationError("Missing the questions array.");
+	if (rawQuestions.length === 0) throw new AskUserValidationError("At least 1 question is required.");
 	if (rawQuestions.length > MAX_QUESTIONS) {
-		throw new AskUserValidationError(`最多 ${MAX_QUESTIONS} 个问题，收到了 ${rawQuestions.length} 个。`);
+		throw new AskUserValidationError(`At most ${MAX_QUESTIONS} questions; received ${rawQuestions.length}.`);
 	}
 
+	const warnings: string[] = [];
 	const usedIds = new Set<string>();
 	const questions: NormalizedQuestion[] = [];
 	rawQuestions.forEach((rawQuestion, index) => {
-		const { question, warnings: questionWarnings } = coerceQuestion(rawQuestion, index);
+		const { question, warnings: questionWarnings } = readQuestion(rawQuestion, index);
 		warnings.push(...questionWarnings);
-		const title = question.title.trim();
-		if (title === "") {
-			throw new AskUserValidationError(`问题 ${index + 1} 缺少 title。`);
-		}
-		question.title = title.slice(0, LIMITS.title);
-		if (question.prompt !== undefined) question.prompt = question.prompt.slice(0, LIMITS.prompt);
-		if (question.default !== undefined) question.default = question.default.slice(0, LIMITS.defaultValue);
-		if (question.kind !== "input") {
-			const rawOptions = question.options ?? [];
-			if (rawOptions.length === 0) {
-				throw new AskUserValidationError(`问题 “${title}” 是选择题但没有选项。`);
-			}
-			if (rawOptions.length > MAX_OPTIONS) {
-				throw new AskUserValidationError(`每个问题最多 ${MAX_OPTIONS} 个选项（问题 “${title}”）。`);
-			}
-			const seen = new Set<string>();
-			const options: AskUserOption[] = [];
-			for (const option of rawOptions) {
-				const label = option.label.trim().slice(0, LIMITS.label);
-				if (label === "") continue;
-				if (seen.has(label)) {
-					warnings.push(`问题 “${title}” 有重复选项 “${label}”，已去重。`);
-					continue;
-				}
-				seen.add(label);
-				const next: AskUserOption = { label };
-				if (option.description) next.description = option.description.slice(0, LIMITS.description);
-				if (option.preview) next.preview = option.preview.slice(0, LIMITS.preview);
-				options.push(next);
-			}
-			if (options.length === 0) {
-				throw new AskUserValidationError(`问题 “${title}” 没有有效选项。`);
-			}
-			question.options = options;
-		} else {
-			delete question.options;
-		}
 
-		let id = question.id?.trim() ?? "";
+		let id = question.id ?? "";
 		if (id === "" || usedIds.has(id)) {
 			let candidate = `q${index + 1}`;
 			let suffix = 1;
@@ -238,26 +248,16 @@ export function normalizeAskUserRequest(raw: unknown): { request: NormalizedRequ
 		questions.push(normalized);
 	});
 
-	const header = firstString(container, ["header", "title", "heading"]);
-	// Only the display aliases are read here. `mode` is deliberately NOT one of
-	// them: the UI route is host configuration and a model parameter must never
-	// influence it (a `mode` key in the input is ignored).
-	const displayModeRaw = asString(container.displayMode ?? container.display_mode)?.trim();
-	const displayMode: "overlay" | "inline" = displayModeRaw === "inline" ? "inline" : "overlay";
-
-	const perQuestion = Number(container.timeoutPerQuestionMs ?? container.timeout_per_question_ms);
-	const timeoutPerQuestionMs =
-		Number.isFinite(perQuestion) && perQuestion >= 0 ? Math.floor(perQuestion) : DEFAULT_TIMEOUT_PER_QUESTION_MS;
-	// The deadline is always base × questionCount. Any absolute override in the
-	// input (e.g. `timeoutMs`) is deliberately ignored so the invariant holds.
-	const totalTimeoutMs = timeoutPerQuestionMs * questions.length;
+	const header = optionalText(raw.header, "header", LIMITS.header);
+	const displayMode = readDisplayMode(raw.displayMode);
+	const timeoutPerQuestionMs = readTimeoutPerQuestionMs(raw.timeoutPerQuestionMs);
 
 	const request: NormalizedRequest = {
 		questions,
 		displayMode,
 		timeoutPerQuestionMs,
-		totalTimeoutMs,
+		totalTimeoutMs: timeoutPerQuestionMs * questions.length,
 	};
-	if (header) request.header = header.slice(0, LIMITS.header);
+	if (header !== undefined) request.header = header;
 	return { request, warnings };
 }

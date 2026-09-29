@@ -1,7 +1,7 @@
 {
   "name": "pi-ask-user",
   "version": "0.1.0",
-  "description": "AskUserUI - a route-forced ask-user interaction component/tool for Pi extensions and MCP bridges (custom TUI, native dialogs, or plain text)",
+  "description": "AskUserUI - a route-forced ask-user interaction component/tool for Pi extensions (custom TUI or native dialogs)",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -20,8 +20,7 @@
   },
   "exports": {
     ".": "./src/index.ts",
-    "./types": "./src/types.ts",
-    "./mcp": "./src/adapters/mcp.ts"
+    "./types": "./src/types.ts"
   },
   "files": [
     "src",

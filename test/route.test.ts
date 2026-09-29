@@ -1,82 +1,134 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_UI_MODE, UI_MODES, isUIMode, resolveUIMode } from "../src/mode.ts";
-import { hostCapabilities } from "../src/route.ts";
-import type { AskUserHost } from "../src/types.ts";
+import { UI_MODES, isUIMode } from "../src/mode.ts";
+import { askUserSupport, createAskUserHost, hostCapabilities, probeRoutes } from "../src/route.ts";
+
+const customUI = { render: async () => ({ kind: "cancelled" as const }) };
+const nativeDialogs = { run: async () => ({ kind: "cancelled" as const }) };
 
 test("capabilities are derived from implementations, not booleans", () => {
-	const plain: AskUserHost = { name: "plain" };
-	assert.deepEqual(hostCapabilities(plain), { customUI: false, nativeDialogs: false });
-
-	const nativeOnly: AskUserHost = {
-		name: "native",
-		nativeDialogs: { run: async () => ({ kind: "cancelled" }) },
-	};
-	assert.deepEqual(hostCapabilities(nativeOnly), { customUI: false, nativeDialogs: true });
-
-	const both: AskUserHost = {
-		name: "both",
-		customUI: { render: async () => ({ kind: "cancelled" }) },
-		nativeDialogs: { run: async () => ({ kind: "cancelled" }) },
-	};
-	assert.deepEqual(hostCapabilities(both), { customUI: true, nativeDialogs: true });
+	assert.deepEqual(hostCapabilities({}), { customUI: false, nativeDialogs: false });
+	assert.deepEqual(hostCapabilities({ nativeDialogs }), { customUI: false, nativeDialogs: true });
+	assert.deepEqual(hostCapabilities({ customUI, nativeDialogs }), { customUI: true, nativeDialogs: true });
 });
 
 test("a declared capability without a callable implementation is not a capability", () => {
-	// Simulates a host trying to declare customUI without a renderer.
-	const fake = {
-		name: "liar",
-		customUI: {} as unknown as NonNullable<AskUserHost["customUI"]>,
-	} satisfies AskUserHost;
+	// Simulates a host trying to declare customUI without a render method.
+	const fake = { customUI: {} as unknown as typeof customUI };
 	assert.equal(hostCapabilities(fake).customUI, false);
 });
 
-test("capabilities verify a forced mode; they never pick one", () => {
-	// No route picker exists any more: routing is configuration. The exports are
-	// the capabilities probe plus the mode resolver.
-	assert.deepEqual([...UI_MODES], ["custom", "native", "text"]);
-	assert.equal(DEFAULT_UI_MODE, "native");
+test("probe order prefers custom when both modes can run", () => {
+	assert.deepEqual(probeRoutes({ customUI: true, nativeDialogs: true }), ["custom", "native"]);
+	assert.deepEqual(probeRoutes({ customUI: true, nativeDialogs: false }), ["custom"]);
+	assert.deepEqual(probeRoutes({ customUI: false, nativeDialogs: true }), ["native"]);
+	assert.deepEqual(probeRoutes({ customUI: false, nativeDialogs: false }), []);
 });
 
-test("mode resolution precedence: option > env > default", () => {
-	// Nothing configured: the default.
-	assert.deepEqual(resolveUIMode(undefined, undefined), { ok: true, mode: "native" });
-	assert.deepEqual(resolveUIMode(undefined, ""), { ok: true, mode: "native" });
-	assert.deepEqual(resolveUIMode(undefined, "   "), { ok: true, mode: "native" });
+// --- no explicit config: initialisation-time probe, 0 / 1 / 2 capabilities ---
 
-	// Env only.
-	assert.deepEqual(resolveUIMode(undefined, "text"), { ok: true, mode: "text" });
-	assert.deepEqual(resolveUIMode(undefined, " TEXT "), { ok: true, mode: "text" });
-
-	// The programmatic option wins over the env.
-	assert.deepEqual(resolveUIMode("custom", "native"), { ok: true, mode: "custom" });
-	assert.deepEqual(resolveUIMode("text", "custom"), { ok: true, mode: "text" });
+test("two capabilities without config probe to custom (priority)", () => {
+	const host = createAskUserHost({ name: "both", customUI, nativeDialogs });
+	assert.equal(askUserSupport(host), host.support, "the public accessor returns the resolved support");
+	assert.deepEqual(host.support, {
+		status: "available",
+		route: "custom",
+		source: "probed",
+		capabilities: { customUI: true, nativeDialogs: true },
+		available: ["custom", "native"],
+	});
 });
 
-test("an invalid env value is an actionable error, not a default", () => {
-	const bad = resolveUIMode(undefined, "CUSTOM_UI");
-	assert.equal(bad.ok, false);
-	if (!bad.ok) {
-		assert.match(bad.message, /PI_ASK_USER_UI_MODE/);
-		assert.match(bad.message, /CUSTOM_UI/);
-		for (const mode of UI_MODES) assert.match(bad.message, new RegExp(mode));
+test("native-only without config probes to native", () => {
+	const host = createAskUserHost({ name: "native", nativeDialogs });
+	assert.equal(host.support.status, "available");
+	if (host.support.status === "available") {
+		assert.equal(host.support.route, "native");
+		assert.equal(host.support.source, "probed");
+		assert.deepEqual(host.support.available, ["native"]);
 	}
 });
 
-test("an invalid programmatic mode is an actionable error, not a default", () => {
-	const bad = resolveUIMode("plain_text" as never, undefined);
-	assert.equal(bad.ok, false);
-	if (!bad.ok) {
-		assert.match(bad.message, /plain_text/);
-		for (const mode of UI_MODES) assert.match(bad.message, new RegExp(mode));
+test("custom-only without config probes to custom", () => {
+	const host = createAskUserHost({ name: "custom", customUI });
+	assert.equal(host.support.status, "available");
+	if (host.support.status === "available") {
+		assert.equal(host.support.route, "custom");
+		assert.equal(host.support.source, "probed");
+		assert.deepEqual(host.support.available, ["custom"]);
 	}
 });
 
-test("isUIMode accepts exactly the three routes and rejects the old name", () => {
+test("no capability without config is no_available_ui and never fabricates a route", () => {
+	const host = createAskUserHost({ name: "plain" });
+	assert.equal(host.support.status, "no_available_ui");
+	assert.equal("route" in host.support, false, "no route may be fabricated");
+	assert.deepEqual(host.support.available, []);
+	assert.deepEqual(host.support.capabilities, { customUI: false, nativeDialogs: false });
+});
+
+// --- explicit config wins over the probe ---
+
+test("an explicit config wins over the probed route", () => {
+	const host = createAskUserHost({ name: "both", mode: "native", customUI, nativeDialogs });
+	assert.equal(host.support.status, "available");
+	if (host.support.status === "available") {
+		assert.equal(host.support.route, "native");
+		assert.equal(host.support.source, "configured");
+	}
+});
+
+test("an explicit config that matches a capability is honoured", () => {
+	const host = createAskUserHost({ name: "both", mode: "custom", customUI, nativeDialogs });
+	assert.equal(host.support.status, "available");
+	if (host.support.status === "available") assert.equal(host.support.route, "custom");
+});
+
+// --- configured but unavailable: no fallback to the probed mode ---
+
+test("configured custom with only native available is configured_unavailable, not native", () => {
+	const host = createAskUserHost({ name: "native-only", mode: "custom", nativeDialogs });
+	assert.equal(host.support.status, "configured_unavailable");
+	if (host.support.status === "configured_unavailable") {
+		assert.equal(host.support.configured, "custom");
+		assert.deepEqual(host.support.available, ["native"]);
+		assert.match(host.support.reason, /no other mode will be used/i);
+	}
+});
+
+test("configured native with only custom available is configured_unavailable", () => {
+	const host = createAskUserHost({ name: "custom-only", mode: "native", customUI });
+	assert.equal(host.support.status, "configured_unavailable");
+	if (host.support.status === "configured_unavailable") {
+		assert.equal(host.support.configured, "native");
+		assert.deepEqual(host.support.available, ["custom"]);
+	}
+});
+
+test("configured custom with nothing available is configured_unavailable", () => {
+	const host = createAskUserHost({ name: "plain", mode: "custom" });
+	assert.equal(host.support.status, "configured_unavailable");
+	if (host.support.status === "configured_unavailable") {
+		assert.deepEqual(host.support.available, []);
+		assert.match(host.support.reason, /no usable interactive UI/i);
+	}
+});
+
+// --- invalid configuration ---
+
+test("an unknown config value is invalid_config and still reports what could run", () => {
+	const host = createAskUserHost({ name: "both", mode: "bogus" as never, customUI, nativeDialogs });
+	assert.equal(host.support.status, "invalid_config");
+	if (host.support.status === "invalid_config") {
+		assert.deepEqual(host.support.available, ["custom", "native"]);
+		assert.match(host.support.reason, /custom, native/);
+	}
+});
+
+test("UI_MODES and isUIMode cover exactly the two supported routes", () => {
+	assert.deepEqual([...UI_MODES], ["custom", "native"]);
 	assert.equal(isUIMode("custom"), true);
 	assert.equal(isUIMode("native"), true);
-	assert.equal(isUIMode("text"), true);
-	assert.equal(isUIMode("plain_text"), false);
-	assert.equal(isUIMode("TEXT"), false);
+	assert.equal(isUIMode("bogus"), false);
 	assert.equal(isUIMode(undefined), false);
 });

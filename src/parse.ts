@@ -78,19 +78,19 @@ export function parseNativeAnswer(question: NormalizedQuestion, raw: string): Pa
 	const tokens = splitOnSeparators(leftTrim);
 	const bad = tokens.find((token) => !PURE_DIGITS.test(token));
 	if (bad !== undefined || tokens.length === 0) {
-		return { ok: false, error: `编号无效：“${leftTrim}” 不是有效的编号列表。` };
+		return { ok: false, error: `Invalid number: "${leftTrim}" is not a valid option-number list.` };
 	}
 
 	const indices = tokens.map((token) => Number.parseInt(token, 10) - 1);
 	const max = question.options.length;
 	const outOfRange = indices.find((idx) => idx < 0 || idx >= max);
 	if (outOfRange !== undefined) {
-		return { ok: false, error: `编号越界：请输入 1-${max} 之间的编号。` };
+		return { ok: false, error: `Number out of range: enter a number between 1 and ${max}.` };
 	}
 
 	const unique = [...new Set(indices)];
 	if (question.kind === "single" && unique.length > 1) {
-		return { ok: false, error: "这是单选题，只能输入一个编号。" };
+		return { ok: false, error: "This is a single-select question; enter only one number." };
 	}
 
 	const ordered = question.kind === "single" ? unique : [...unique].sort((a, b) => a - b);
@@ -107,13 +107,13 @@ export function nativeInputHint(question: NormalizedQuestion): string {
 	switch (question.kind) {
 		case "single":
 			return question.options.length > 0
-				? "单选。回复编号（如 2），或 “2 | 补充说明”，或直接回复自由文本。"
-				: "自由输入。直接回复文本作为答案。";
+				? 'Single select. Reply with a number (e.g. 2), or "2 | note", or just reply with free text.'
+				: "Free input. Reply with text to answer.";
 		case "multi":
 			return question.options.length > 0
-				? "多选。回复编号，逗号分隔（如 1,3），或 “1,3 | 补充说明”，或直接回复自由文本。"
-				: "自由输入。直接回复文本作为答案。";
+				? 'Multi select. Reply with numbers separated by commas (e.g. 1,3), or "1,3 | note", or just reply with free text.'
+				: "Free input. Reply with text to answer.";
 		case "input":
-			return "自由输入。直接回复文本作为答案。";
+			return "Free input. Reply with text to answer.";
 	}
 }

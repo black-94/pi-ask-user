@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createDeadline } from "../src/deadline.ts";
 import { normalizeAskUserRequest } from "../src/schema.ts";
-import { createMCPNativeRunner } from "../src/adapters/mcp.ts";
 import { AskUserComponent, type CustomUIResult } from "../src/ui/custom.ts";
 import { createNativeRunner } from "../src/ui/native.ts";
 import type { AskUserAnswer, NormalizedRequest } from "../src/types.ts";
@@ -19,8 +18,8 @@ function request(input: unknown): NormalizedRequest {
 
 const PARAMS = {
 	questions: [
-		{ title: "Deploy", kind: "single", options: ["staging", "prod"], default: "prod" },
-		{ title: "Scope", kind: "multi", options: ["unit", "integration"], default: "integration" },
+		{ title: "Deploy", kind: "single", options: [{ label: "staging" }, { label: "prod" }], default: "prod" },
+		{ title: "Scope", kind: "multi", options: [{ label: "unit" }, { label: "integration" }], default: "integration" },
 	],
 };
 
@@ -54,22 +53,10 @@ async function viaNative(): Promise<AskUserAnswer[]> {
 	return outcome.answers!;
 }
 
-async function viaMCP(): Promise<AskUserAnswer[]> {
-	const req = request(PARAMS);
-	const outcome = await createMCPNativeRunner(async () => ({ action: "accept", content: { answer: "" } })).run({
-		request: req,
-		deadline: createDeadline(10_000),
-	});
-	assert.equal(outcome.kind, "submitted");
-	return outcome.answers!;
-}
-
-test("defaults resolve identically across custom, native, and MCP routes", async () => {
+test("defaults resolve identically across the custom and native routes", async () => {
 	const custom = await viaCustom();
 	const native = await viaNative();
-	const mcp = await viaMCP();
 	assert.deepEqual(custom, native);
-	assert.deepEqual(native, mcp);
 	assert.deepEqual(custom[0]!.selections, ["prod"]);
 	assert.deepEqual(custom[1]!.selections, ["integration"]);
 	for (const answer of custom) {
@@ -77,7 +64,7 @@ test("defaults resolve identically across custom, native, and MCP routes", async
 	}
 });
 
-test("a default that is plain text (input question) is treated consistently", async () => {
+test("a free-text default (input question) is treated consistently", async () => {
 	const params = { questions: [{ title: "Note", kind: "input", default: "none" }] };
 	const viaComponent = () => {
 		let result: CustomUIResult | undefined;

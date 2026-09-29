@@ -2,17 +2,22 @@
  * Public types for AskUserUI.
  *
  * AskUserUI is a host-adaptive "ask the user" interaction primitive. A request
- * is answered through one of three routes:
+ * is answered through one of two routes:
  *
  *  - `custom` — a custom terminal UI (only a real Pi TUI)
  *  - `native` — one native input dialog per question (`ctx.hasUI` + callable input)
- *  - `text`   — no UI: options are appended to the assistant output as text
  *
- * The route is **forced**, never detected: a trusted host adapter resolves the
- * UI mode and the core honours exactly that mode. Resolution order is
- * programmatic `mode` > `PI_ASK_USER_UI_MODE` > default `native`. The model's
- * tool parameters can never influence it, and an unsupported forced mode is an
- * actionable error — there is no probing and no silent fallback.
+ * The route is resolved **once, when the host adapter is created**, from
+ * trustworthy inputs only:
+ *
+ *  1. an explicit configured `mode`, which wins whenever it is supplied, or
+ *  2. otherwise an initialisation-time probe of the bound implementations —
+ *     `custom` when both can run, `native` when only that can run.
+ *
+ * If an explicitly configured route cannot run here, it is reported as
+ * unsupported; the probe result is never substituted for it. If nothing can
+ * run, there is no route at all. The model's tool parameters can never
+ * influence any of this.
  *
  * Capabilities remain bound to a concrete implementation object, so a route
  * cannot be declared without something that actually performs it.
@@ -27,7 +32,7 @@ export interface AskUserOption {
 	label: string;
 	/** One-line explanation rendered next to the label. */
 	description?: string;
-	/** Optional Markdown preview. Custom UI only; never shown on native/plain-text routes. */
+	/** Optional Markdown preview. Custom UI only; never shown on the native route. */
 	preview?: string;
 }
 
@@ -83,23 +88,16 @@ export interface AskUserAnswer {
 
 /**
  * - `answered`  — the user answered through a custom or native UI.
- * - `cancelled` — the user dismissed the interaction (or the caller aborted).
+ * - `aborted`   — the user dismissed the interaction (or the caller aborted).
  * - `timeout`   — the shared deadline expired before an answer was given.
- * - `error`     — the renderer or a declared output hook failed; or the forced
- *                 mode is invalid (`invalid_config`) or unsupported here
- *                 (`unsupported_mode`). Never a fallback to another route.
- * - `deferred`  — the `text` route with a final-output hook that accepted the
- *                 questionnaire for an append after the model's final answer.
- * - `delivered` — the `text` route with no output hook: the formatted
- *                 questionnaire is returned in `plainText` for the caller to hand
- *                 to the user directly. This is a normal outcome, not an error;
- *                 the question is still unanswered and the caller replies on the
- *                 next turn.
+ * - `error`     — the renderer failed; or the forced mode is invalid
+ *                 (`invalid_config`) or unsupported here (`unsupported_mode`).
+ *                 Never a fallback to another route.
  */
-export type AskUserStatus = "answered" | "cancelled" | "timeout" | "error" | "deferred" | "delivered";
-export type AskUserRoute = "custom" | "native" | "text";
+export type AskUserStatus = "answered" | "aborted" | "timeout" | "error";
+export type AskUserRoute = "custom" | "native";
 /**
- * The configured UI route: the same three values as {@link AskUserRoute}.
+ * The configured UI route: the same two values as {@link AskUserRoute}.
  * Configuration never falls back — an unsupported value is an error.
  */
 export type AskUserUIMode = AskUserRoute;
@@ -108,9 +106,9 @@ export type AskUserErrorCode =
 	| "custom_ui_failed"
 	| "native_ui_failed"
 	| "empty_answer"
-	| "no_output_hook"
 	| "invalid_config"
 	| "unsupported_mode"
+	| "not_initialized"
 	| "internal";
 
 /** An actionable failure: what went wrong and what to do about it. */
@@ -123,25 +121,14 @@ export interface AskUserError {
 export interface AskUserResult {
 	status: AskUserStatus;
 	/**
-	 * Which route serviced the request. For `invalid_config` no route ran: the
-	 * reported value is `text` and `plainText` is never populated — it is not a
-	 * fallback, the request was refused.
+	 * Which route serviced the request. Absent when no route ran at all
+	 * (`invalid_request`, `invalid_config`, or an environment with no usable UI).
+	 * When an explicitly configured route was refused as unavailable, it names
+	 * that requested route.
 	 */
-	route: AskUserRoute;
+	route?: AskUserRoute;
 	answers: AskUserAnswer[];
-	/**
-	 * Formatted plain-text questionnaire. Populated for the no-UI routes: it is
-	 * queued on a final-output hook (`deferred`) or returned inline for the caller
-	 * to deliver (`delivered`).
-	 */
-	plainText?: string;
-	/**
-	 * True only when {@link PlainTextOutputHook.queue} accepted the appendix for a
-	 * deferred append after the model's final answer. False means the caller must
-	 * deliver `plainText` itself (normal for hosts without a final-output hook).
-	 */
-	deferred: boolean;
-	/** Populated when `status === "cancelled"`. */
+	/** Populated when `status === "aborted"`. */
 	cancelledReason?: "user" | "abort";
 	/** Non-fatal normalization notes (e.g. dropped duplicate options). */
 	warnings?: string[];
@@ -155,13 +142,74 @@ export interface AskUserResult {
 /**
  * Structural capabilities of a host: `customUI` is true only when the adapter
  * binds a callable custom renderer, `nativeDialogs` only when it binds a
- * callable native runner. They verify that a *forced* mode can really run; they
- * are never used to pick a route.
+ * callable native runner. They describe what can really run here; they never
+ * invent a route.
  */
 export interface HostCapabilities {
 	customUI: boolean;
 	nativeDialogs: boolean;
 }
+
+/** The structural implementation surface probed to derive {@link HostCapabilities}. */
+export interface HostImplementations {
+	customUI?: CustomUIRenderer;
+	nativeDialogs?: NativeDialogRunner;
+}
+
+/**
+ * The outcome of resolving a host's route, computed once at host creation.
+ *
+ * `available` is the probe result (the modes that can really run here), in
+ * priority order with `custom` first. `route` is present only when a request
+ * will actually be serviced — never a fabricated default.
+ */
+export interface AskUserUISupportAvailable {
+	status: "available";
+	/** The route a request will be serviced through. */
+	route: AskUserRoute;
+	/** `configured` when an explicit mode was supplied, else `probed`. */
+	source: "configured" | "probed";
+	capabilities: HostCapabilities;
+	available: AskUserRoute[];
+}
+
+/** An explicit mode was configured but cannot run here. No fallback is taken. */
+export interface AskUserUISupportConfiguredUnavailable {
+	status: "configured_unavailable";
+	/** The explicitly configured route, which cannot run in this environment. */
+	configured: AskUserRoute;
+	capabilities: HostCapabilities;
+	available: AskUserRoute[];
+	reason: string;
+}
+
+/** Nothing can run here: neither a custom TUI nor native dialogs. */
+export interface AskUserUISupportNoUI {
+	status: "no_available_ui";
+	capabilities: HostCapabilities;
+	available: [];
+	reason: string;
+}
+
+/** The configured value is not a known route. */
+export interface AskUserUISupportInvalidConfig {
+	status: "invalid_config";
+	capabilities: HostCapabilities;
+	/** What could run here, had the configuration been valid. */
+	available: AskUserRoute[];
+	reason: string;
+}
+
+/**
+ * A discriminated union describing whether — and how — a host can prompt the
+ * user right now, without actually prompting. Narrow on `status`: the `route`
+ * field exists only for `"available"`.
+ */
+export type AskUserUISupport =
+	| AskUserUISupportAvailable
+	| AskUserUISupportConfiguredUnavailable
+	| AskUserUISupportNoUI
+	| AskUserUISupportInvalidConfig;
 
 /** Shared input passed to custom/native renderers. */
 export interface AskUIInput {
@@ -190,17 +238,6 @@ export interface NativeDialogRunner {
 }
 
 /**
- * Output hook used by the `text` route. It appends the formatted questionnaire
- * to the assistant output before control returns to the caller. `available` must
- * be false when the host has no working output hook, so callers can fall back to
- * delivering {@link AskUserResult.plainText} themselves.
- */
-export interface PlainTextOutputHook {
-	readonly available: boolean;
-	queue(text: string): void;
-}
-
-/**
  * A trusted host adapter. Each declared capability is bound to the object that
  * implements it: `customUI` is present iff the host really renders custom UI,
  * `nativeDialogs` is present iff the host really shows native dialogs. There is
@@ -209,41 +246,20 @@ export interface PlainTextOutputHook {
 export interface AskUserHost {
 	name: string;
 	/**
-	 * The route this host is configured to use, already resolved by the trusted
-	 * adapter (programmatic option > `PI_ASK_USER_UI_MODE` > default `native`).
-	 * The core honours it as a forced route unless the call supplies its own
-	 * {@link AskUserOptions.mode}, which overrides it.
+	 * Resolved once, when this host was created, from the explicit configuration
+	 * and the bound implementations. The core honours it verbatim: it never
+	 * re-selects a route per request.
 	 */
-	mode?: AskUserUIMode;
-	/**
-	 * Set by the adapter when its own UI configuration is invalid (e.g. an
-	 * unparsable `PI_ASK_USER_UI_MODE`). Without a per-call `mode` the core
-	 * reports it as `status: "error"` with code `invalid_config` instead of
-	 * falling back to another route; a per-call `mode` overrides it.
-	 */
-	configError?: AskUserError;
-	/**
-	 * Bound wherever the implementation can really run, independently of the
-	 * configured {@link mode} — so a per-call mode override has something to
-	 * run. A forced route with no bound implementation is `unsupported_mode`.
-	 */
+	support: AskUserUISupport;
+	/** Bound wherever the custom route can really run. */
 	customUI?: CustomUIRenderer;
+	/** Bound wherever the native route can really run. */
 	nativeDialogs?: NativeDialogRunner;
-	plainText?: PlainTextOutputHook;
 }
 
 /** Options for {@link askUser}. */
 export interface AskUserOptions {
 	host: AskUserHost;
-	/**
-	 * Per-call forced UI route — the single highest precedence in the whole
-	 * chain. It overrides the host adapter's configured mode *and* the
-	 * adapter's own `configError` (including an invalid environment value), so
-	 * it only succeeds when the adapter has bound a callable implementation for
-	 * it; otherwise the result is `unsupported_mode`. An invalid value is an
-	 * error (`invalid_config`), never a fallback.
-	 */
-	mode?: AskUserUIMode;
 	signal?: AbortSignal;
 	onUpdate?: (text: string) => void;
 	/** Injectable clock, used by tests. Defaults to `Date.now`. */

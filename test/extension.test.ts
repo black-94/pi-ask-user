@@ -5,11 +5,11 @@ import type { Component } from "@earendil-works/pi-tui";
 import {
 	createPiHost,
 	registerAskUserUITool,
+	askUserSupport,
 	type AskUserUIDetails,
 	type RegisterAskUserUIOptions,
 } from "../src/index.ts";
 import { askUser } from "../src/core.ts";
-import { AppendixRegistry } from "../src/output.ts";
 
 const identityTheme = {
 	fg: (_color: string, text: string) => text,
@@ -20,11 +20,13 @@ const identityTheme = {
 	inverse: (text: string) => text,
 };
 
-function harness(registry: AppendixRegistry, options: RegisterAskUserUIOptions = {}) {
-	const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+type Handler = (event: unknown, ctx: unknown) => unknown;
+
+function harness(options: RegisterAskUserUIOptions = {}) {
+	const handlers = new Map<string, Handler[]>();
 	let tool: Record<string, unknown> | undefined;
 	const pi = {
-		on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
+		on: (event: string, handler: Handler) => {
 			const list = handlers.get(event) ?? [];
 			list.push(handler);
 			handlers.set(event, list);
@@ -34,17 +36,25 @@ function harness(registry: AppendixRegistry, options: RegisterAskUserUIOptions =
 			tool = definition;
 		},
 	} as unknown as ExtensionAPI;
-	// An empty env by default: the tests must not depend on the real environment.
-	const registerOptions: RegisterAskUserUIOptions = { registry, env: options.env ?? {} };
-	if (options.mode !== undefined) registerOptions.mode = options.mode;
-	registerAskUserUITool(pi, registerOptions);
+	registerAskUserUITool(pi, options);
 	assert.ok(tool, "tool must be registered");
 	return { tool, handlers };
+}
+
+/** Fire the extension's session_start handler(s), as Pi does at session start. */
+function startSession(handlers: Map<string, Handler[]>, ctx: ExtensionContext, reason = "startup"): void {
+	for (const handler of handlers.get("session_start") ?? []) handler({ type: "session_start", reason }, ctx);
+}
+
+/** Fire the extension's session_shutdown handler(s). */
+function shutdownSession(handlers: Map<string, Handler[]>, reason = "quit"): void {
+	for (const handler of handlers.get("session_shutdown") ?? []) handler({ type: "session_shutdown", reason }, {});
 }
 
 interface FakeTool {
 	name: string;
 	executionMode?: string;
+	promptGuidelines?: string[];
 	execute: (
 		id: string,
 		params: unknown,
@@ -70,167 +80,9 @@ function rpcCtx(input: (prompt: string) => Promise<string | undefined>): Extensi
 	return { mode: "rpc", hasUI: true, ui: { input } } as unknown as ExtensionContext;
 }
 
-test("registers AskUserUI as a sequential tool", () => {
-	const { tool } = harness(new AppendixRegistry());
-	const definition = tool as unknown as FakeTool;
-	assert.equal(definition.name, "AskUserUI");
-	assert.equal(definition.executionMode, "sequential");
-});
-
-test("text mode takes the text route, then message_end appends it after the answer", async () => {
-	const registry = new AppendixRegistry();
-	const { tool, handlers } = harness(registry, { mode: "text" });
-
-	const result = await (tool as unknown as FakeTool).execute("call-1", PARAMS, undefined, undefined, noUICtx("json"));
-	assert.equal(result.details.route, "text");
-	assert.equal(result.details.status, "deferred");
-	assert.equal(result.details.deferred, true);
-	assert.match(result.content[0]!.text, /不要自行回答/);
-	assert.equal(registry.hasPending(), true);
-
-	const messageEnd = handlers.get("message_end")?.[0]!;
-	const event = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "All set." }] } };
-	const replaced = (await messageEnd(event, noUICtx("json"))) as { message?: { content: Array<{ text?: string }> } };
-	assert.ok(replaced?.message);
-	// The appendix is appended AFTER the model's own answer, in order.
-	assert.equal(replaced!.message!.content.length, 2);
-	assert.equal(replaced!.message!.content[0]!.text, "All set.");
-	assert.match(replaced!.message!.content[1]!.text ?? "", /自由输入/);
-});
-
-test("the appendix is held back while an assistant message still has tool calls", async () => {
-	const registry = new AppendixRegistry();
-	const { tool, handlers } = harness(registry, { mode: "text" });
-	await (tool as unknown as FakeTool).execute("call-1b", PARAMS, undefined, undefined, noUICtx("print"));
-
-	const messageEnd = handlers.get("message_end")?.[0]!;
-	const withToolCall = {
-		type: "message_end",
-		message: { role: "assistant", content: [{ type: "toolCall", id: "t", name: "AskUserUI", arguments: {} }] },
-	};
-	assert.equal(await messageEnd(withToolCall, noUICtx("print")), undefined);
-	assert.equal(registry.hasPending(), true);
-
-	const finals = {
-		type: "message_end",
-		message: { role: "assistant", content: [{ type: "text", text: "Here you go." }] },
-	};
-	const replaced = (await messageEnd(finals, noUICtx("print"))) as { message?: { content: Array<{ text?: string }> } };
-	assert.equal(replaced!.message!.content[0]!.text, "Here you go.");
-	assert.match(replaced!.message!.content[1]!.text ?? "", /自由输入/);
-});
-
-test("json/print with the default native mode is an actionable error, not a fallback to text", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry);
-	const result = await (tool as unknown as FakeTool).execute("call-2", PARAMS, undefined, undefined, noUICtx("json"));
-	assert.equal(result.details.route, "native");
-	assert.equal(result.details.status, "error");
-	assert.equal(result.details.error?.code, "unsupported_mode");
-	assert.equal(result.details.deferred, false);
-	assert.equal(result.details.plainText, undefined, "no text may be delivered on a refused route");
-	assert.equal(registry.hasPending(), false);
-	// Actionable: names the requirement and the alternative.
-	assert.match(result.content[0]!.text, /unsupported_mode/);
-	assert.match(result.content[0]!.text, /ctx\.ui\.input/);
-	assert.match(result.content[0]!.text, /text/);
-});
-
-test("rpc with a dialog-capable client uses native dialogs by default", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry);
-	const ctx = rpcCtx(async () => "2");
-	const result = await (tool as unknown as FakeTool).execute("call-2b", PARAMS, undefined, undefined, ctx);
-	assert.equal(result.details.route, "native");
-	assert.equal(result.details.status, "answered");
-	assert.match(result.content[0]!.text, /prod/);
-});
-
-test("a nonresponsive rpc client yields an actionable timeout, never an unsupported guess", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry);
-	// The client has hasUI and a callable input, but never answers.
-	const ctx = rpcCtx(() => new Promise<never>(() => {}));
-	const result = await (tool as unknown as FakeTool).execute("call-2c", PARAMS_FAST, undefined, undefined, ctx);
-	assert.equal(result.details.route, "native");
-	assert.equal(result.details.status, "timeout");
-	assert.notEqual(result.details.error?.code, "unsupported_mode");
-	assert.equal(result.details.plainText, undefined);
-	assert.equal(registry.hasPending(), false);
-	// Actionable: tells the caller what to do when the client never responds.
-	assert.match(result.content[0]!.text, /超时/);
-	assert.match(result.content[0]!.text, /PI_ASK_USER_UI_MODE=text/);
-});
-
-test("tui mode also defaults to native dialogs", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry);
-	const ctx = { mode: "tui", hasUI: true, ui: { input: async () => "2" } } as unknown as ExtensionContext;
-	const result = await (tool as unknown as FakeTool).execute("call-3a", PARAMS, undefined, undefined, ctx);
-	assert.equal(result.details.route, "native");
-	assert.equal(result.details.status, "answered");
-	assert.match(result.content[0]!.text, /prod/);
-	assert.equal(registry.hasPending(), false);
-});
-
-test("createPiHost binds implementations independently of its configured route", async () => {
-	const registry = new AppendixRegistry();
-	// A TUI host explicitly configured for text still binds the interactive
-	// implementations, so a per-call override can use them.
-	const ctx = {
-		mode: "tui",
-		hasUI: true,
-		ui: { input: async () => "2" },
-	} as unknown as ExtensionContext;
-	const host = createPiHost(ctx, { registry, mode: "text" });
-	assert.equal(host.mode, "text");
-	assert.equal(host.customUI, undefined, "no ctx.ui.custom, so no custom renderer");
-	assert.ok(host.nativeDialogs, "the native runner is bound regardless of the configured route");
-
-	const overridden = await askUser(PARAMS, { host, mode: "native" });
-	assert.equal(overridden.route, "native");
-	assert.equal(overridden.status, "answered");
-	assert.equal(overridden.answers[0]!.selections[0], "prod");
-
-	// Without the override the configured text route is used.
-	const configured = await askUser(PARAMS, { host });
-	assert.equal(configured.route, "text");
-	assert.equal(configured.status, "deferred");
-});
-
-test("a per-call mode overrides an invalid createPiHost configuration", async () => {
-	const registry = new AppendixRegistry();
-	const ctx = { mode: "tui", hasUI: true, ui: { input: async () => "2" } } as unknown as ExtensionContext;
-	const host = createPiHost(ctx, { registry, env: { PI_ASK_USER_UI_MODE: "nope" } });
-	assert.equal(host.mode, undefined);
-	assert.equal(host.configError?.code, "invalid_config");
-
-	const result = await askUser(PARAMS, { host, mode: "native" });
-	assert.equal(result.route, "native");
-	assert.equal(result.status, "answered");
-
-	const refused = await askUser(PARAMS, { host });
-	assert.equal(refused.status, "error");
-	assert.equal(refused.error?.code, "invalid_config");
-});
-
-test("forcing custom outside a real Pi TUI is an actionable error", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry, { mode: "custom" });
-	const ctx = rpcCtx(async () => "2");
-	const result = await (tool as unknown as FakeTool).execute("call-3b", PARAMS, undefined, undefined, ctx);
-	assert.equal(result.details.route, "custom");
-	assert.equal(result.details.status, "error");
-	assert.equal(result.details.error?.code, "unsupported_mode");
-	assert.match(result.content[0]!.text, /TUI/);
-	assert.equal(registry.hasPending(), false);
-});
-
-test("custom mode in tui renders the real custom component", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry, { mode: "custom" });
-	let rendered = "";
-	const ctx = {
+/** A TUI context that exposes both a callable input dialog and a custom renderer. */
+function tuiWithCustom(onRender?: (rendered: string) => void): ExtensionContext {
+	return {
 		mode: "tui",
 		hasUI: true,
 		ui: {
@@ -243,101 +95,268 @@ test("custom mode in tui renders the real custom component", async () => {
 						{},
 						(result: unknown) => resolve(result),
 					);
-					rendered = component.render(100).join("\n");
+					onRender?.(component.render(100).join("\n"));
 					queueMicrotask(() => component.handleInput?.("\r"));
 				}),
 		},
 	} as unknown as ExtensionContext;
+}
 
-	const result = await (tool as unknown as FakeTool).execute("call-3", PARAMS, undefined, undefined, ctx);
+function execute(tool: Record<string, unknown>, params: unknown, ctx: ExtensionContext, id = "call") {
+	return (tool as unknown as FakeTool).execute(id, params, undefined, undefined, ctx);
+}
+
+test("registers AskUserUI as a sequential tool and subscribes to the session lifecycle", () => {
+	const { tool, handlers } = harness();
+	const definition = tool as unknown as FakeTool;
+	assert.equal(definition.name, "AskUserUI");
+	assert.equal(definition.executionMode, "sequential");
+	assert.equal(handlers.get("session_start")?.length, 1);
+	assert.equal(handlers.get("session_shutdown")?.length, 1);
+	const guidelines = definition.promptGuidelines?.join(" ") ?? "";
+	assert.match(guidelines, /unsupported_mode/, "the no-UI guidance must point at unsupported_mode");
+	assert.match(guidelines, /cannot display the configured UI/i, "the model must report the host cannot display it");
+	assert.match(guidelines, /do not answer the question yourself/i, "the model must not answer on the user's behalf");
+	assert.match(guidelines, /retry(ing)? in a host that supports/i, "the model must suggest a supporting host");
+	assert.doesNotMatch(
+		guidelines,
+		/(output|emit|print|render) the questionnaire/i,
+		"the model must not be told to output the questionnaire itself",
+	);
+	assert.doesNotMatch(guidelines, /next message|in your reply/i, "an ordinary reply must not substitute for an answer");
+});
+
+test("a tool call before session_start is an explicit not_initialized error", async () => {
+	const { tool } = harness();
+	const result = await execute(tool, PARAMS, noUICtx("json"), "call-early");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "not_initialized");
+	assert.equal(result.details.route, undefined);
+	assert.deepEqual(result.details.answers, []);
+	// The honest reason, not a fabricated "no UI in this environment".
+	assert.notEqual(result.details.error?.code, "unsupported_mode");
+	assert.match(result.content[0]!.text, /session_start/);
+});
+
+test("json and print with no usable UI are an actionable error, not a fallback", async () => {
+	for (const mode of ["json", "print"] as const) {
+		const { tool, handlers } = harness();
+		startSession(handlers, noUICtx(mode));
+		const result = await execute(tool, PARAMS, noUICtx(mode), `call-${mode}`);
+		assert.equal(result.details.status, "error", `${mode}: refused, not answered`);
+		assert.equal(result.details.error?.code, "unsupported_mode", `${mode}: actionable code`);
+		assert.equal(result.details.route, undefined, `${mode}: no route is fabricated`);
+		assert.deepEqual(result.details.answers, [], `${mode}: no answers`);
+		assert.match(result.content[0]!.text, /unsupported_mode/, `${mode}: names the failure`);
+	}
+});
+
+test("json and print with an explicit custom mode are configured_unavailable", async () => {
+	for (const mode of ["json", "print"] as const) {
+		const { tool, handlers } = harness({ mode: "custom" });
+		startSession(handlers, noUICtx(mode));
+		const result = await execute(tool, PARAMS, noUICtx(mode), `call-${mode}-custom`);
+		assert.equal(result.details.status, "error", `${mode}: refused`);
+		assert.equal(result.details.error?.code, "unsupported_mode", `${mode}: actionable code`);
+		assert.equal(result.details.route, "custom", `${mode}: names the requested route`);
+		assert.deepEqual(result.details.answers, [], `${mode}: no answers`);
+		assert.match(result.content[0]!.text, /no other mode will be used/i, `${mode}: states no fallback`);
+	}
+});
+
+test("an invalid programmatic mode is an actionable invalid_config error", async () => {
+	const { tool, handlers } = harness({ mode: "bogus" as never });
+	startSession(handlers, rpcCtx(async () => "2"));
+	const result = await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-bad");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "invalid_config");
+	assert.equal(result.details.route, undefined);
+	assert.match(result.content[0]!.text, /custom, native/);
+});
+
+test("rpc with a dialog-capable client probes to native dialogs", async () => {
+	const { tool, handlers } = harness();
+	startSession(handlers, rpcCtx(async () => "2"));
+	const result = await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-rpc");
+	assert.equal(result.details.route, "native");
+	assert.equal(result.details.status, "answered");
+	assert.match(result.content[0]!.text, /prod/);
+});
+
+test("a nonresponsive rpc client yields an actionable timeout, never an unsupported guess", async () => {
+	const { tool, handlers } = harness();
+	startSession(handlers, rpcCtx(() => new Promise<never>(() => {})));
+	const result = await execute(tool, PARAMS_FAST, rpcCtx(async () => "2"), "call-rpc-silent");
+	assert.equal(result.details.route, "native");
+	assert.equal(result.details.status, "timeout");
+	assert.notEqual(result.details.error?.code, "unsupported_mode");
+	assert.match(result.content[0]!.text, /timed out/i);
+});
+
+test("a tui host with only an input dialog probes to native", async () => {
+	const { tool, handlers } = harness();
+	const ctx = { mode: "tui", hasUI: true, ui: { input: async () => "2" } } as unknown as ExtensionContext;
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-tui-native");
+	assert.equal(result.details.route, "native");
+	assert.equal(result.details.status, "answered");
+	assert.match(result.content[0]!.text, /prod/);
+});
+
+test("a tui host with both capabilities probes to custom (priority)", async () => {
+	const { tool, handlers } = harness();
+	let rendered = "";
+	const ctx = tuiWithCustom((lines) => {
+		rendered = lines;
+	});
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-tui-both");
+	assert.equal(result.details.route, "custom");
+	assert.equal(result.details.status, "answered");
+	assert.match(rendered, new RegExp(PARAMS.questions[0]!.title));
+});
+
+test("an explicit custom mode in tui renders the real custom component", async () => {
+	const { tool, handlers } = harness({ mode: "custom" });
+	let rendered = "";
+	const ctx = tuiWithCustom((lines) => {
+		rendered = lines;
+	});
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-tui-custom");
 	assert.equal(result.details.route, "custom");
 	assert.equal(result.details.status, "answered");
 	assert.match(rendered, new RegExp(PARAMS.questions[0]!.title));
 	assert.match(result.content[0]!.text, /staging/);
-	assert.equal(registry.hasPending(), false);
 });
 
-test("model parameters cannot change the mode", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry, { mode: "text" });
+test("forcing custom outside a real Pi TUI is a configured_unavailable error", async () => {
+	const { tool, handlers } = harness({ mode: "custom" });
 	const ctx = rpcCtx(async () => "2");
+	startSession(handlers, ctx);
+	const result = await execute(tool, PARAMS, ctx, "call-rpc-custom");
+	assert.equal(result.details.route, "custom");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "unsupported_mode");
+	assert.match(result.content[0]!.text, /no other mode will be used/i);
+});
+
+test("a mode/route parameter cannot change the resolved route", async () => {
+	const { tool, handlers } = harness();
+	const ctx = rpcCtx(async () => "2");
+	startSession(handlers, ctx);
+	// `mode`/`route` are ignored on purpose and are never read for routing.
 	const spoofed = {
 		...PARAMS,
 		mode: "custom",
-		uiMode: "custom",
-		ui_mode: "native",
 		route: "custom",
-		capabilities: { customUI: true, nativeDialogs: true },
-		nativeDialogs: true,
-		customUI: true,
-		PI_ASK_USER_UI_MODE: "custom",
 	};
-	const result = await (tool as unknown as FakeTool).execute("call-2d", spoofed, undefined, undefined, ctx);
-	assert.equal(result.details.route, "text", "the forced text mode must win over any model parameter");
-	assert.equal(result.details.status, "deferred");
-});
-
-test("the programmatic mode beats the environment variable", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry, { mode: "native", env: { PI_ASK_USER_UI_MODE: "text" } });
-	const ctx = rpcCtx(async () => "2");
-	const result = await (tool as unknown as FakeTool).execute("call-2e", PARAMS, undefined, undefined, ctx);
-	assert.equal(result.details.route, "native");
+	const result = await execute(tool, spoofed, ctx, "call-spoofed");
+	assert.equal(result.details.route, "native", "the probed route must win over any model parameter");
 	assert.equal(result.details.status, "answered");
 });
 
-test("the environment variable selects the route when no mode is passed", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry, { env: { PI_ASK_USER_UI_MODE: "TEXT" } });
-	const result = await (tool as unknown as FakeTool).execute("call-2f", PARAMS, undefined, undefined, noUICtx("json"));
-	assert.equal(result.details.route, "text");
-	assert.equal(result.details.status, "deferred");
-	assert.equal(registry.hasPending(), true);
-});
-
-test("an invalid environment value is an actionable invalid_config error", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry, { env: { PI_ASK_USER_UI_MODE: "plain_text" } });
-	const result = await (tool as unknown as FakeTool).execute("call-2g", PARAMS, undefined, undefined, noUICtx("json"));
+test("an unexpected parameter key is rejected and cannot change the resolved route", async () => {
+	const { tool, handlers } = harness();
+	const ctx = rpcCtx(async () => "2");
+	startSession(handlers, ctx);
+	const result = await execute(tool, { ...PARAMS, uiMode: "custom" }, ctx, "call-spoof-rejected");
 	assert.equal(result.details.status, "error");
-	assert.equal(result.details.error?.code, "invalid_config");
-	assert.equal(result.details.plainText, undefined);
-	assert.equal(registry.hasPending(), false);
-	assert.match(result.content[0]!.text, /PI_ASK_USER_UI_MODE/);
-	assert.match(result.content[0]!.text, /custom \| native \| text/);
-});
-
-test("an invalid programmatic mode is an actionable invalid_config error", async () => {
-	const registry = new AppendixRegistry();
-	const { tool } = harness(registry, { mode: "plain_text" as never });
-	const result = await (tool as unknown as FakeTool).execute("call-2h", PARAMS, undefined, undefined, noUICtx("json"));
-	assert.equal(result.details.status, "error");
-	assert.equal(result.details.error?.code, "invalid_config");
-	assert.match(result.content[0]!.text, /custom \| native \| text/);
+	assert.equal(result.details.error?.code, "invalid_request");
+	assert.equal(result.details.route, undefined, "a rejected call cannot report a fabricated route");
 });
 
 test("invalid parameters produce a model-readable error result", async () => {
-	const { tool } = harness(new AppendixRegistry(), { mode: "text" });
-	const result = await (tool as unknown as FakeTool).execute(
-		"call-4",
-		{ questions: [] },
-		undefined,
-		undefined,
-		noUICtx("json"),
-	);
+	const { tool, handlers } = harness();
+	startSession(handlers, noUICtx("json"));
+	const result = await execute(tool, { questions: [] }, noUICtx("json"), "call-invalid");
 	assert.equal(result.details.status, "error");
 	assert.equal(result.details.error?.code, "invalid_request");
-	assert.equal(result.details.route, "text");
-	assert.match(result.content[0]!.text, /参数无效/);
+	assert.equal(result.details.route, undefined);
+	assert.match(result.content[0]!.text, /invalid parameters/i);
 });
 
-test("a stale pending questionnaire is cleared at the next user turn", async () => {
-	const registry = new AppendixRegistry();
-	const { tool, handlers } = harness(registry, { mode: "text" });
-	await (tool as unknown as FakeTool).execute("call-5", PARAMS, undefined, undefined, noUICtx("json"));
-	assert.equal(registry.hasPending(), true);
+test("the host is created once at session_start and reused; later ctx changes do not re-probe", async () => {
+	const { tool, handlers } = harness();
+	// Session starts in RPC: the probe picks native.
+	startSession(handlers, rpcCtx(async () => "2"));
 
-	const messageStart = handlers.get("message_start")?.[0]!;
-	await messageStart({ type: "message_start", message: { role: "user", content: "hi" } }, noUICtx("json"));
-	assert.equal(registry.hasPending(), false);
+	const first = await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-one");
+	assert.equal(first.details.route, "native");
+
+	// A later call receives a TUI-with-custom ctx, which would probe to custom if
+	// the route were re-selected. It must keep using the session's native host.
+	const second = await execute(tool, PARAMS, tuiWithCustom(), "call-two");
+	assert.equal(second.details.route, "native");
+	assert.equal(second.details.status, "answered");
+
+	// And a no-UI ctx must not turn the session into "unsupported" either.
+	const third = await execute(tool, PARAMS, noUICtx("json"), "call-three");
+	assert.equal(third.details.route, "native");
+	assert.equal(third.details.status, "answered");
+});
+
+test("a session started with no usable UI stays refused even if a later call has UI", async () => {
+	const { tool, handlers } = harness();
+	startSession(handlers, noUICtx("json"));
+	const result = await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-after-no-ui");
+	assert.equal(result.details.status, "error");
+	assert.equal(result.details.error?.code, "unsupported_mode");
+	assert.equal(result.details.route, undefined);
+});
+
+test("session_shutdown releases the host, so later calls are not_initialized", async () => {
+	const { tool, handlers } = harness();
+	startSession(handlers, rpcCtx(async () => "2"));
+	assert.equal((await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-live")).details.status, "answered");
+
+	shutdownSession(handlers);
+	const after = await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-after-shutdown");
+	assert.equal(after.details.status, "error");
+	assert.equal(after.details.error?.code, "not_initialized");
+});
+
+test("a reload re-initialises the host from the fresh context", async () => {
+	const { tool, handlers } = harness();
+	startSession(handlers, noUICtx("json"));
+	assert.equal((await execute(tool, PARAMS, noUICtx("json"), "call-before-reload")).details.error?.code, "unsupported_mode");
+
+	// Pi fires session_shutdown(reload) then session_start(reload) with the new ctx.
+	shutdownSession(handlers, "reload");
+	startSession(handlers, rpcCtx(async () => "2"), "reload");
+	const after = await execute(tool, PARAMS, rpcCtx(async () => "2"), "call-after-reload");
+	assert.equal(after.details.route, "native");
+	assert.equal(after.details.status, "answered");
+});
+
+test("createPiHost is public: other extensions can build a host and inspect its support", () => {
+	const noUI = createPiHost(noUICtx("json"));
+	assert.equal(askUserSupport(noUI).status, "no_available_ui");
+
+	const nativeOnly = createPiHost(rpcCtx(async () => "2"));
+	const nativeSupport = askUserSupport(nativeOnly);
+	assert.equal(nativeSupport.status, "available");
+	if (nativeSupport.status === "available") {
+		assert.equal(nativeSupport.route, "native");
+		assert.equal(nativeSupport.source, "probed");
+	}
+
+	const both = createPiHost(tuiWithCustom());
+	const bothSupport = askUserSupport(both);
+	assert.equal(bothSupport.status, "available");
+	if (bothSupport.status === "available") {
+		assert.equal(bothSupport.route, "custom");
+		assert.deepEqual(bothSupport.available, ["custom", "native"]);
+	}
+
+	const configuredMismatch = createPiHost(rpcCtx(async () => "2"), { mode: "custom" });
+	assert.equal(configuredMismatch.support.status, "configured_unavailable");
+});
+
+test("a host created outside the extension answers with the usual semantics", async () => {
+	const host = createPiHost(rpcCtx(async () => "2"));
+	const result = await askUser(PARAMS, { host });
+	assert.equal(result.route, "native");
+	assert.equal(result.status, "answered");
+	assert.equal(result.answers[0]!.selections[0], "prod");
 });

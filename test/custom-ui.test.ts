@@ -101,7 +101,7 @@ test("narrow terminals stack the preview below the options", () => {
 	assertFits(lines, width);
 	const text = lines.join("\n");
 	assert.match(text, /Alpha preview/);
-	assert.ok(text.includes("预览："));
+	assert.ok(text.includes("Preview:"));
 	assert.ok(!lines.some((line) => /1\. Alpha/.test(line) && /Alpha preview/.test(line)));
 });
 
@@ -163,7 +163,7 @@ test("a required question blocks submission until answered", () => {
 	const { component, getResult } = mount(req);
 	component.handleInput(KEYS.enter);
 	assert.equal(getResult(), undefined);
-	assert.match(component.render(80).join("\n"), /必答/);
+	assert.match(component.render(80).join("\n"), /required/i);
 });
 
 test("a question with a default can be skipped with `s`", () => {
@@ -187,12 +187,12 @@ test("multiple questions: tabs reach a review tab before submitting", () => {
 		],
 	});
 	const { component, getResult } = mount(req);
-	assert.match(component.render(100).join("\n"), /提交/);
+	assert.match(component.render(100).join("\n"), /Submit/);
 	component.handleInput(KEYS.enter); // answer first -> advances to second tab
 	component.handleInput(KEYS.enter); // answer second -> advances to review tab
 	assert.equal(getResult(), undefined);
 	const review = component.render(100).join("\n");
-	assert.match(review, /提交前确认/);
+	assert.match(review, /Review before submitting/);
 	component.handleInput(KEYS.enter); // submit from review
 	const result = getResult();
 	assert.ok(result);
@@ -213,7 +213,7 @@ test("review blocks submission while a question is unanswered", () => {
 	component.handleInput(KEYS.shiftTab); // jump to the review tab without answering
 	component.handleInput(KEYS.enter);
 	assert.equal(getResult(), undefined);
-	assert.match(component.render(100).join("\n"), /还没有答案/);
+	assert.match(component.render(100).join("\n"), /no answer yet/i);
 });
 
 test("Escape cancels", () => {
@@ -231,15 +231,15 @@ test("the component times out at the deadline", async () => {
 	component.dispose();
 });
 
-test("CJK and emoji labels stay within narrow widths", () => {
+test("full-width and emoji labels stay within narrow widths", () => {
 	const req = request({
 		questions: [
 			{
-				title: "部署目标选择",
+				title: "Ｄｅｐｌｏｙ ｔａｒｇｅｔ ｐｉｃｋｅｒ",
 				kind: "multi",
 				options: [
-					{ label: "预发布环境（staging）", description: "用于内部验证 🚀" },
-					{ label: "生产环境", description: "面向真实用户" },
+					{ label: "Ｐｒｅ－ｒｅｌｅａｓｅ （ｓｔａｇｉｎｇ）", description: "Ｆｏｒ ｉｎｔｅｒｎａｌ ｖｅｒｉｆｉｃａｔｉｏｎ 🚀" },
+					{ label: "Ｐｒｏｄｕｃｔｉｏｎ", description: "Ｆｏｒ ｒｅａｌ ｕｓｅｒｓ" },
 				],
 			},
 		],
@@ -340,11 +340,11 @@ test("very small widths never overflow", () => {
 	const req = request({
 		questions: [
 			{
-				title: "选择一个部署目标",
+				title: "Ｃｈｏｏｓｅ ａ ｄｅｐｌｏｙ ｔａｒｇｅｔ",
 				kind: "multi",
 				options: [
-					{ label: "预发布环境", description: "内部验证", preview: "# 预发布" },
-					{ label: "生产环境", description: "真实用户" },
+					{ label: "Ｐｒｅ－ｒｅｌｅａｓｅ", description: "Ｉｎｔｅｒｎａｌ ｖｅｒｉｆｉｃａｔｉｏｎ", preview: "# Ｐｒｅ－ｒｅｌｅａｓｅ" },
+					{ label: "Ｐｒｏｄｕｃｔｉｏｎ", description: "Ｒｅａｌ ｕｓｅｒｓ" },
 				],
 			},
 		],
@@ -387,7 +387,7 @@ test("the free-input row and a cancel hint survive rows 5 and 8", () => {
 		assert.ok(lines.length <= rows, `height ${lines.length} exceeds rows ${rows}`);
 		const text = lines.join("\n");
 		assert.match(text, /›/, "the free-input row must be visible");
-		assert.match(text, /Esc 取消/, "a cancel hint must be visible");
+		assert.match(text, /Esc cancel/, "a cancel hint must be visible");
 		component.dispose();
 	}
 });
@@ -400,7 +400,7 @@ test("very short terminals degrade without overflowing", () => {
 		const text = component.render(100).join("\n");
 		assert.equal(component.render(100).length, rows);
 		assert.match(text, /›/);
-		assert.match(text, /Esc 取消/);
+		assert.match(text, /Esc cancel/);
 		component.dispose();
 	}
 	// Below the minimum the input is still kept; the hint is dropped at rows 1-2.
@@ -419,7 +419,7 @@ test("very short terminals degrade without overflowing", () => {
 
 test("the pinned input row is reachable and submittable at rows 8", () => {
 	const { component, getResult } = mount(
-		request({ questions: [{ title: "Deploy", kind: "single", options: ["staging", "prod"] }] }),
+		request({ questions: [{ title: "Deploy", kind: "single", options: [{ label: "staging" }, { label: "prod" }] }] }),
 		10_000,
 		8,
 	);
@@ -493,7 +493,7 @@ test("(d) clearing the input cannot bypass a required question", () => {
 	component.handleInput(KEYS.backspace);
 	component.handleInput(KEYS.ctrlEnter);
 	assert.equal(getResult(), undefined, "an emptied required answer must not submit");
-	assert.match(component.render(100).join("\n"), /还没有答案/);
+	assert.match(component.render(100).join("\n"), /no answer yet/i);
 });
 
 test("(d) clearing an optional input falls back to its default", () => {
@@ -536,11 +536,11 @@ test("ANSI-styled themes still measure width correctly", () => {
 	const req = request({
 		questions: [
 			{
-				title: "选择一个部署目标",
+				title: "Ｃｈｏｏｓｅ ａ ｄｅｐｌｏｙ ｔａｒｇｅｔ",
 				kind: "single",
 				options: [
-					{ label: "预发布", description: "内部验证", preview: "# 预发布\n\n- 快速" },
-					{ label: "生产", description: "真实用户" },
+					{ label: "Ｐｒｅ－ｒｅｌｅａｓｅ", description: "Ｉｎｔｅｒｎａｌ ｖｅｒｉｆｉｃａｔｉｏｎ", preview: "# Ｐｒｅ－ｒｅｌｅａｓｅ\n\n- Ｆａｓｔ" },
+					{ label: "Ｐｒｏｄｕｃｔｉｏｎ", description: "Ｒｅａｌ ｕｓｅｒｓ" },
 				],
 			},
 		],

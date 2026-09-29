@@ -24,8 +24,8 @@ function scriptedUI(answers: Array<string | undefined>): { ui: NativeDialogUI; p
 test("one input per question, parsed into selections", async () => {
 	const req = request({
 		questions: [
-			{ title: "One", kind: "single", options: ["a", "b"] },
-			{ title: "Many", kind: "multi", options: ["x", "y", "z"] },
+			{ title: "One", kind: "single", options: [{ label: "a" }, { label: "b" }] },
+			{ title: "Many", kind: "multi", options: [{ label: "x" }, { label: "y" }, { label: "z" }] },
 			{ title: "Note", kind: "input" },
 		],
 	});
@@ -42,18 +42,18 @@ test("one input per question, parsed into selections", async () => {
 });
 
 test("invalid input re-prompts with the reason", async () => {
-	const req = request({ questions: [{ title: "One", kind: "single", options: ["a", "b"] }] });
+	const req = request({ questions: [{ title: "One", kind: "single", options: [{ label: "a" }, { label: "b" }] }] });
 	const { ui, prompts } = scriptedUI(["7", "1,2", "1"]);
 	const outcome = await createNativeRunner(ui).run({ request: req, deadline: createDeadline(5000) });
 	assert.equal(outcome.kind, "submitted");
 	assert.equal(prompts.length, 3);
-	assert.match(prompts[1]!, /越界/);
-	assert.match(prompts[2]!, /单选/);
+	assert.match(prompts[1]!, /out of range/i);
+	assert.match(prompts[2]!, /single-select/i);
 	assert.deepEqual(outcome.answers![0]!.selections, ["a"]);
 });
 
 test("empty input with a default uses the default", async () => {
-	const req = request({ questions: [{ title: "One", kind: "single", options: ["a", "b"], default: "b" }] });
+	const req = request({ questions: [{ title: "One", kind: "single", options: [{ label: "a" }, { label: "b" }], default: "b" }] });
 	const { ui } = scriptedUI([""]);
 	const outcome = await createNativeRunner(ui).run({ request: req, deadline: createDeadline(5000) });
 	assert.equal(outcome.kind, "submitted");
@@ -67,15 +67,15 @@ test("empty input without a default re-prompts then accepts", async () => {
 	const outcome = await createNativeRunner(ui).run({ request: req, deadline: createDeadline(5000) });
 	assert.equal(outcome.kind, "submitted");
 	assert.equal(prompts.length, 2);
-	assert.match(prompts[1]!, /不能为空/);
+	assert.match(prompts[1]!, /cannot be empty/i);
 	assert.equal(outcome.answers![0]!.freeText, "real answer");
 });
 
 test("dismissal cancels the whole questionnaire", async () => {
 	const req = request({
 		questions: [
-			{ title: "One", kind: "single", options: ["a", "b"] },
-			{ title: "Two", kind: "single", options: ["c", "d"] },
+			{ title: "One", kind: "single", options: [{ label: "a" }, { label: "b" }] },
+			{ title: "Two", kind: "single", options: [{ label: "c" }, { label: "d" }] },
 		],
 	});
 	const { ui } = scriptedUI(["1", undefined]);
@@ -84,7 +84,7 @@ test("dismissal cancels the whole questionnaire", async () => {
 });
 
 test("expired deadline reports a timeout, not a cancel", async () => {
-	const req = request({ questions: [{ title: "One", kind: "single", options: ["a", "b"] }] });
+	const req = request({ questions: [{ title: "One", kind: "single", options: [{ label: "a" }, { label: "b" }] }] });
 	let now = 0;
 	const deadline = createDeadline(100, () => now);
 	const ui: NativeDialogUI = {
@@ -100,8 +100,8 @@ test("expired deadline reports a timeout, not a cancel", async () => {
 test("only the remaining time is handed to each dialog", async () => {
 	const req = request({
 		questions: [
-			{ title: "One", kind: "single", options: ["a", "b"] },
-			{ title: "Two", kind: "single", options: ["c", "d"] },
+			{ title: "One", kind: "single", options: [{ label: "a" }, { label: "b" }] },
+			{ title: "Two", kind: "single", options: [{ label: "c" }, { label: "d" }] },
 		],
 	});
 	let now = 0;
@@ -122,7 +122,7 @@ test("only the remaining time is handed to each dialog", async () => {
 });
 
 test("caller abort is reported as abort", async () => {
-	const req = request({ questions: [{ title: "One", kind: "single", options: ["a", "b"] }] });
+	const req = request({ questions: [{ title: "One", kind: "single", options: [{ label: "a" }, { label: "b" }] }] });
 	const controller = new AbortController();
 	controller.abort();
 	const ui: NativeDialogUI = { input: async () => undefined };
