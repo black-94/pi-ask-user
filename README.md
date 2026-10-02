@@ -23,7 +23,7 @@ or probed when the host is created, never per request.
 ```bash
 pi install /absolute/path/to/pi-ask-user
 # or, during development
-pi --extension ./src/index.ts
+pi --extension ./index.ts
 ```
 
 Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`,
