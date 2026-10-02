@@ -1,11 +1,26 @@
 {
-  "name": "pi-ask-user",
+  "name": "@black942026/pi-ask-user",
   "version": "0.1.0",
-  "description": "AskUser - a route-forced ask-user interaction component/tool for Pi extensions (custom TUI or native dialogs)",
+  "description": "Structured user questions for Pi, with interactive terminal dialogs, native input dialogs, and a reusable TypeScript API.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/black-94/pi-ask-user.git"
+  },
+  "homepage": "https://github.com/black-94/pi-ask-user#readme",
+  "bugs": {
+    "url": "https://github.com/black-94/pi-ask-user/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "keywords": [
     "pi-package",
+    "pi-extension",
     "pi",
     "pi-coding-agent",
     "extension",
@@ -31,7 +46,8 @@
   "scripts": {
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run test"
+    "check": "npm run typecheck && npm run test",
+    "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.87.0",

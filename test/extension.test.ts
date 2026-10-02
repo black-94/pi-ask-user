@@ -13,6 +13,7 @@ import {
 	type RegisterAskUserOptions,
 } from "../src/index.ts";
 import { askUser } from "../src/core.ts";
+import askUserExtension, { registerAskUser as packageRegisterAskUser } from "../index.ts";
 
 const identityTheme = {
 	fg: (_color: string, text: string) => text,
@@ -22,6 +23,18 @@ const identityTheme = {
 	strikethrough: (text: string) => text,
 	inverse: (text: string) => text,
 };
+
+test("package entry point exports the Pi extension factory and reusable API", () => {
+	assert.equal(packageRegisterAskUser, registerAskUser);
+	const registeredTools: string[] = [];
+	const registeredEvents: string[] = [];
+	askUserExtension({
+		on: (event: string) => { registeredEvents.push(event); },
+		registerTool: (tool: { name: string }) => { registeredTools.push(tool.name); },
+	} as unknown as ExtensionAPI);
+	assert.deepEqual(registeredTools, ["ask_user"]);
+	assert.deepEqual(registeredEvents, ["session_start", "session_shutdown"]);
+});
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 

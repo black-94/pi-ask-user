@@ -1,6 +1,11 @@
-# pi-ask-user
+# @black942026/pi-ask-user
 
-`ask_user` — a route-resolved "ask the user" interaction for Pi.
+A Pi extension for asking structured questions through interactive terminal
+or native input dialogs. Supports single-choice, multiple-choice, and free-text
+answers, with configurable timeouts and cancellation.
+
+Install the package to add the **`ask_user`** tool to Pi. Other extensions can
+reuse the same interaction through the TypeScript API.
 
 Two entry points share one strict questionnaire contract and one route resolution:
 
@@ -21,13 +26,15 @@ or probed when the host is created, never per request.
 ## Install
 
 ```bash
-pi install /absolute/path/to/pi-ask-user
-# or, during development
-pi --extension ./index.ts
+pi install npm:@black942026/pi-ask-user
 ```
 
-Peer dependencies: `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`,
-`typebox`.
+Start a new Pi session, or run `/reload` in an existing session, to load the
+extension. The `ask_user` tool is registered automatically.
+
+Requires Node.js ≥ 22.19.0 and Pi ≥ 0.87.0. Pi supplies the host dependencies
+`@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox`;
+no separate dependency installation is needed when using `pi install`.
 
 ## Tool parameters
 
@@ -185,7 +192,7 @@ interaction to its host and check availability first:
 
 ```ts
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createAskUser } from "pi-ask-user";
+import { createAskUser } from "@black942026/pi-ask-user";
 
 async function askWhereToDeploy(ctx: ExtensionContext) {
   const ask = createAskUser(ctx); // or createAskUser(host), or { mode }
@@ -353,10 +360,16 @@ for a refused explicit config, names the requested route.
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node --test test/*.test.ts (Node ≥ 22.6 runs TS directly)
+npm test            # node --test test/*.test.ts
 npm run check       # typecheck + tests
+
+# Load a local checkout for development
+pi --extension ./index.ts
+# Or install it as a local package
+pi install /absolute/path/to/pi-ask-user
 ```
 
-`@earendil-works/pi-tui` is a runtime dependency of the custom UI, and `typebox`
-is a runtime dependency of the parameter schema (`src/schema.ts`). The routing,
-parsing, and deadline layers are pure, non-TUI, and free of both.
+`@earendil-works/pi-tui` and `typebox` are host-provided peer dependencies used
+by the custom UI and parameter schema (`src/schema.ts`). They are also declared
+as development dependencies for local checks. The routing, parsing, and deadline
+layers are pure, non-TUI, and free of both.
