@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPiHost } from "../src/adapters/pi.ts";
 import {
 	AskUserConfigError,
@@ -36,9 +37,72 @@ test.after(() => rmSync(dir, { recursive: true, force: true }));
 
 // --- defaults and missing file ---
 
-test("the default config path is ~/.pi/ask-user/config.json", () => {
-	assert.equal(USER_CONFIG_DIR, join(homedir(), ".pi", "ask-user"));
-	assert.equal(USER_CONFIG_PATH, join(USER_CONFIG_DIR, "config.json"));
+test("the config path is ask-user.json alongside Pi's settings.json", () => {
+	assert.equal(USER_CONFIG_DIR, getAgentDir());
+	assert.equal(USER_CONFIG_PATH, join(USER_CONFIG_DIR, "ask-user.json"));
+});
+
+/** Resolve defaults in a fresh process with an isolated home and Pi directory. */
+function resolveInIsolatedHome(home: string, agentDir?: string) {
+	const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, USERPROFILE: home };
+	delete env.PI_CODING_AGENT_DIR;
+	if (agentDir !== undefined) env.PI_CODING_AGENT_DIR = agentDir;
+	const moduleUrl = new URL("../src/config.ts", import.meta.url).href;
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", `
+		import { USER_CONFIG_DIR, USER_CONFIG_PATH, resolveAskUserConfig } from ${JSON.stringify(moduleUrl)};
+		console.log(JSON.stringify({ dir: USER_CONFIG_DIR, path: USER_CONFIG_PATH, resolved: resolveAskUserConfig() }));
+	`], { env, encoding: "utf8", timeout: 30_000 });
+	assert.equal(child.error, undefined);
+	assert.equal(child.status, 0, child.stderr);
+	return JSON.parse(child.stdout) as {
+		dir: string;
+		path: string;
+		resolved: { config: Record<string, unknown>; loaded: boolean; path?: string; error?: unknown };
+	};
+}
+
+test("without a Pi directory override the default file is ~/.pi/agent/ask-user.json", () => {
+	const home = mkdtempSync(join(dir, "home-"));
+	const agentDir = join(home, ".pi", "agent");
+	mkdirSync(agentDir, { recursive: true });
+	writeFileSync(join(agentDir, "ask-user.json"), JSON.stringify({ displayMode: "inline" }));
+	const result = resolveInIsolatedHome(home);
+	assert.equal(result.dir, agentDir);
+	assert.equal(result.path, join(agentDir, "ask-user.json"));
+	assert.equal(result.resolved.path, result.path);
+	assert.equal(result.resolved.loaded, true);
+	assert.deepEqual(result.resolved.config, { displayMode: "inline" });
+});
+
+test("PI_CODING_AGENT_DIR selects the directory and default config file", () => {
+	const home = mkdtempSync(join(dir, "home-"));
+	const agentDir = join(home, "custom-agent");
+	mkdirSync(agentDir);
+	writeFileSync(join(agentDir, "ask-user.json"), JSON.stringify({ mode: "native" }));
+	const result = resolveInIsolatedHome(home, agentDir);
+	assert.equal(result.dir, agentDir);
+	assert.equal(result.path, join(agentDir, "ask-user.json"));
+	assert.equal(result.resolved.loaded, true);
+	assert.deepEqual(result.resolved.config, { mode: "native" });
+});
+
+test("a tilde in PI_CODING_AGENT_DIR is expanded by Pi", () => {
+	const home = mkdtempSync(join(dir, "home-"));
+	const result = resolveInIsolatedHome(home, "~/custom-agent");
+	assert.equal(result.dir, join(home, "custom-agent"));
+	assert.equal(result.path, join(home, "custom-agent", "ask-user.json"));
+});
+
+test("the old ~/.pi/ask-user/config.json is not read as a fallback", () => {
+	const home = mkdtempSync(join(dir, "home-"));
+	const legacyDir = join(home, ".pi", "ask-user");
+	mkdirSync(legacyDir, { recursive: true });
+	writeFileSync(join(legacyDir, "config.json"), JSON.stringify({ mode: "native" }));
+	const result = resolveInIsolatedHome(home);
+	assert.equal(result.resolved.error, undefined);
+	assert.equal(result.resolved.loaded, false);
+	assert.deepEqual(result.resolved.config, {});
+	assert.equal(result.resolved.path, join(home, ".pi", "agent", "ask-user.json"));
 });
 
 test("a missing config file means built-in defaults (nothing configured)", () => {
@@ -153,6 +217,8 @@ test("reserved and conflicting toggle keys are rejected, never substituted", () 
 		["space", /reserved by the questionnaire/i],
 		["up", /reserved by the questionnaire/i],
 		["ctrl+c", /conflicts with a questionnaire control/i],
+		["alt+q", /conflicts with a questionnaire control/i],
+		["ALT+Q", /conflicts with a questionnaire control/i],
 		["ctrl+enter", /reserved by the questionnaire/i],
 		["o", /would capture ordinary typing/i],
 	];
@@ -176,6 +242,7 @@ test("isAllowedOverlayToggleSpec matches the config decision", () => {
 	assert.equal(isAllowedOverlayToggleSpec("f5"), true);
 	assert.equal(isAllowedOverlayToggleSpec("escape"), false);
 	assert.equal(isAllowedOverlayToggleSpec("ctrl+c"), false);
+	assert.equal(isAllowedOverlayToggleSpec("alt+q"), false);
 	assert.equal(isAllowedOverlayToggleSpec("o"), false);
 	assert.equal(isAllowedOverlayToggleSpec("alt+banana"), false);
 });

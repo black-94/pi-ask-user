@@ -77,12 +77,18 @@ then dropped. Duplicate option labels are de-duplicated and reported in
 
 ## User config file
 
-There are **no environment variables**. User preferences live in a documented
-JSON file:
+There are **no AskUser-specific environment-variable preferences**. User
+preferences live in a JSON file alongside Pi's `settings.json`:
 
 ```
-~/.pi/ask-user/config.json
+~/.pi/agent/ask-user.json
 ```
+
+The directory is resolved by Pi's `getAgentDir()`. If you set Pi's
+`PI_CODING_AGENT_DIR`, the file is `<PI_CODING_AGENT_DIR>/ask-user.json` instead.
+The old `~/.pi/ask-user/config.json` location is no longer read; move an existing
+file to the new location (without overwriting a config already there), then
+restart Pi or run `/reload`.
 
 No file — or an empty/whitespace-only file — means the built-in defaults. The
 knobs are:
@@ -114,8 +120,8 @@ against the questionnaire's own controls. A malformed spec (`alt+banana`), a
 reserved key (`escape`/`esc` — which must keep cancelling — plus
 `enter`/`tab`/arrows/`space`/`pageUp`/…), a bare printable key that would swallow
 typing (`o`), and conflicting chords (`ctrl+c`, `ctrl+d`, `ctrl+u`, `ctrl+p`,
-`ctrl+n`, `ctrl+enter`) are each rejected with a specific reason. A key is never
-silently substituted.
+`ctrl+n`, `ctrl+enter`, `alt+q`) are each rejected with a specific reason. A key
+is never silently substituted.
 
 ### Effective precedence and read timing
 
@@ -278,6 +284,19 @@ an optional sink — `createAskUser(ctx, { events: { waitStarted, waitEnded } })
 or `createAskUser(host, { events })` — or accept that no runtime events are
 emitted. `AskUserEventSink` is exported for this.
 
+## Cancel countdown shortcut
+
+In the **custom terminal UI** (overlay or inline), press **`Alt+Q`** to cancel
+this questionnaire's countdown without dismissing it or changing your answers.
+The header shows **`No timeout`**; you can keep answering, submit normally, or
+press `Esc` to dismiss. Caller aborts still work. This is a one-way change for
+the current questionnaire only; the next call starts with its configured timeout.
+An already-expired deadline cannot be cancelled.
+
+The key is shown in the bottom hints and reserved against `overlayToggleKey`
+conflicts. Native input dialogs do not support this shortcut. If an overlay is
+hidden, restore it first with its show/hide key before pressing `Alt+Q`.
+
 ## Overlay show/hide key
 
 On the **custom overlay route only** (never inline, never native), the overlay
@@ -328,18 +347,21 @@ for a refused explicit config, names the requested route.
 ## Key constraints
 
 - **The deadline is shared and owned by the core.** Per questionnaire it is
-  strictly `timeoutPerQuestionMs × questionCount` (default 60 s each), clamped to
+  initially `timeoutPerQuestionMs × questionCount` (default 60 s each), clamped to
   `MAX_SAFE_TIMEOUT_MS` (2³¹−1); there is no absolute override. The deadline and
   the caller's cancellation are raced independently of the renderer, so a renderer
   that never resolves or ignores its `AbortSignal` still yields
-  `timeout`/`aborted`; late results are discarded. Cancellation is checked before
-  any route branch, so an already-aborted call never renders a UI.
+  `timeout`/`aborted`, unless the user explicitly cancels the timeout with `Alt+Q`
+  in the custom UI (caller aborts remain effective); late results are discarded.
+  Cancellation is checked before any route branch, so an already-aborted call
+  never renders a UI.
 - **A missing route is an error, not a downgrade.** JSON/print, or an explicit
   `mode` that cannot run, is refused with `unsupported_mode` and never replaced by
   another route.
-- **Configuration is a file, never the environment.** No `process.env` knob
-  exists; `~/.pi/ask-user/config.json` is read once per host/session and
-  strictly validated. An invalid config is `invalid_config`, never a fallback.
+- **Preferences are configured in a file, not environment variables.**
+  `<Pi agent directory>/ask-user.json` (normally `~/.pi/agent/ask-user.json`) is
+  read once per host/session and strictly validated. Only the directory follows
+  Pi's `PI_CODING_AGENT_DIR`. An invalid config is `invalid_config`, never a fallback.
 - **Events never leak content by default.** `herdr:blocked` bounds a real wait
   exactly once on each side; outcome events are one per UI attempt and carry only
   correlation id, route, and status.
@@ -373,3 +395,6 @@ pi install /absolute/path/to/pi-ask-user
 by the custom UI and parameter schema (`src/schema.ts`). They are also declared
 as development dependencies for local checks. The routing, parsing, and deadline
 layers are pure, non-TUI, and free of both.
+
+For maintainer release instructions, see
+[CONTRIBUTING.md](https://github.com/black-94/pi-ask-user/blob/main/CONTRIBUTING.md#release).

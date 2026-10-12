@@ -53,7 +53,7 @@ function harness(options: RegisterAskUserOptions = {}) {
 		},
 	} as unknown as ExtensionAPI;
 	// `configFile: false` keeps tests hermetic: they never read the developer's
-	// real ~/.pi/ask-user/config.json. Tests that exercise the file pass
+	// real <Pi agent directory>/ask-user.json. Tests that exercise the file pass
 	// an explicit `configFile` to override.
 	registerAskUser(pi, { configFile: false, ...options });
 	assert.ok(tool, "tool must be registered");

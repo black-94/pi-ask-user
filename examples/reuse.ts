@@ -6,10 +6,11 @@
  *
  * `createAskUser(ctx)` binds the interaction to this host and resolves its route
  * once (an explicit `mode`, else the user config file, else a probe preferring
- * `custom`). The user config at `~/.pi/ask-user/config.json` is read
- * once here and its `displayMode`/`timeoutPerQuestionMs` preferences win over the
- * request. Availability is readable up front — before any UI is shown — so the
- * command can bail out early. A direct call resolves to the caller and never
+ * `custom`). The user config at `<Pi agent directory>/ask-user.json`
+ * (normally `~/.pi/agent/ask-user.json`) is read once here and its
+ * `displayMode`/`timeoutPerQuestionMs` preferences win over the request.
+ * Availability is readable up front — before any UI is shown — so the command
+ * can bail out early. A direct call resolves to the caller and never
  * forwards anything to the model; a direct call has no Pi event bus, so pass an
  * `events` sink to observe the wait (see README).
  */

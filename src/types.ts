@@ -70,8 +70,8 @@ export interface AskUserRequest {
 	/**
 	 * Base timeout per question in milliseconds. Defaults to 60000.
 	 *
-	 * The questionnaire's single deadline is always
-	 * `timeoutPerQuestionMs × questionCount`; there is no absolute override.
+	 * The questionnaire's initial shared deadline is
+	 * `timeoutPerQuestionMs × questionCount`; the user can cancel it in the custom UI.
 	 */
 	timeoutPerQuestionMs?: number;
 }
@@ -220,6 +220,8 @@ export type AskUserSupport =
 export interface AskUIInput {
 	request: NormalizedRequest;
 	deadline: Deadline;
+	/** Custom UI only: disable this questionnaire's timeout; false if already expired. */
+	cancelTimeout?: () => boolean;
 	signal?: AbortSignal;
 	/** Report progress such as "Waiting for user input...". */
 	onUpdate?: (text: string) => void;

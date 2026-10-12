@@ -13,27 +13,43 @@ export function safeTimeoutMs(ms: number): number {
 	return Math.min(Math.floor(ms), MAX_SAFE_TIMEOUT_MS);
 }
 
+/** A shared deadline that the user can disable for the current questionnaire. */
+export interface CancellableDeadline extends Deadline {
+	/** Disable expiry. Returns false if the deadline has already expired. */
+	cancel(): boolean;
+}
+
 /**
  * Create a single overall deadline for a questionnaire.
  *
- * The deadline is always `timeoutMs` (which callers compute as
+ * The initial deadline is `totalMs` (which callers compute as
  * `timeoutPerQuestionMs × questionCount`). It is clamped to
  * {@link MAX_SAFE_TIMEOUT_MS} so `setTimeout` never overflows. Every interaction
  * for the questionnaire shares this one deadline; native dialogs receive only
- * the remaining time. A deadline never degrades to another route.
+ * the remaining time. `cancel()` disables expiry but does not clear any timers;
+ * the core and custom UI clear their timers separately. A deadline never
+ * degrades to another route.
  */
-export function createDeadline(totalMs: number, now: () => number = Date.now): Deadline {
+export function createDeadline(totalMs: number, now: () => number = Date.now): CancellableDeadline {
 	const startedAt = now();
 	const safeTotal = safeTimeoutMs(totalMs);
 	const expiresAt = safeTotal === 0 ? startedAt : startedAt + safeTotal;
+	let cancelled = false;
 	return {
 		startedAt,
-		expiresAt,
+		get expiresAt(): number {
+			return cancelled ? Infinity : expiresAt;
+		},
 		remainingMs(): number {
-			return Math.max(0, expiresAt - now());
+			return cancelled ? Infinity : Math.max(0, expiresAt - now());
 		},
 		expired(): boolean {
-			return now() >= expiresAt;
+			return !cancelled && now() >= expiresAt;
+		},
+		cancel(): boolean {
+			if (!cancelled && now() >= expiresAt) return false;
+			cancelled = true;
+			return true;
 		},
 	};
 }

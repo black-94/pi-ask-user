@@ -1,0 +1,79 @@
+name: Publish to npm
+
+# 推送版本 tag 后只暂存，不直接上架；维护者发布步骤见 CONTRIBUTING.md。
+# 配置 repository secret NPM_TOKEN（Read and write (stage only)）。
+# 暂存成功后，由启用 2FA 的维护者在 npmjs.com 或通过 npm stage approve 批准。
+# 已暂存的版本不要直接重跑；先批准，或 npm stage reject 后再重跑。
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+
+      # Node 22 自带的 npm 10 不支持 npm stage；固定主版本以避免意外跨大版本升级。
+      - name: Upgrade npm
+        run: npm install -g npm@^12
+
+      - name: Verify version matches tag
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Expected a stable version tag such as v0.1.1"
+            exit 1
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          ACTUAL="$(node -p "require('./package.json').version")"
+          if [[ "$ACTUAL" != "$VERSION" ]]; then
+            echo "::error::package.json version ($ACTUAL) does not match tag ($VERSION)"
+            exit 1
+          fi
+          LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
+          LOCK_ROOT_VERSION="$(node -p "require('./package-lock.json').packages[''].version")"
+          if [[ "$LOCK_VERSION" != "$VERSION" || "$LOCK_ROOT_VERSION" != "$VERSION" ]]; then
+            echo "::error::package-lock.json versions do not match tag ($VERSION)"
+            exit 1
+          fi
+          echo "All versions match tag $VERSION"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and test
+        run: npm run check
+
+      - name: Preview package contents
+        run: npm pack --dry-run
+
+      - name: Stage @black942026/pi-ask-user
+        run: |
+          set -euo pipefail
+          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
+            echo "::error::Configure the repository secret NPM_TOKEN with a stage-only npm token"
+            exit 1
+          fi
+          npm stage publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

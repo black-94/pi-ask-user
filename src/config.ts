@@ -1,16 +1,18 @@
 /**
  * User configuration for AskUser.
  *
- * Configuration is a plain JSON file — never environment variables. It lives in
- * a per-user directory and is read **once per host/session creation**, never per
- * request:
+ * Configuration is a plain JSON file — no AskUser-specific environment knobs.
+ * It lives alongside Pi's settings.json and is read **once per host/session
+ * creation**, never per request:
  *
- *   ~/.pi/ask-user/config.json
+ *   ~/.pi/agent/ask-user.json
+ *
+ * The directory follows Pi's getAgentDir(), including PI_CODING_AGENT_DIR.
  *
  * No file (or an empty file) means the built-in defaults. An existing file is
  * validated strictly: malformed JSON, unknown keys, and bad values are reported
  * as actionable `invalid_config` errors instead of being silently ignored or
- * coerced. There are deliberately no environment-variable knobs.
+ * coerced. Preferences are configured only through the file or explicit options.
  *
  * Effective precedence for every knob is:
  *
@@ -21,17 +23,19 @@
  * reports what the user actually configured, leaving unset knobs `undefined`.
  */
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { AskUserDisplayMode, AskUserMode, AskUserUiPreferences } from "./types.ts";
 
 /** Directory holding the user config file. */
-export const USER_CONFIG_DIR = join(homedir(), ".pi", "ask-user");
-/** The documented user config file. */
-export const USER_CONFIG_PATH = join(USER_CONFIG_DIR, "config.json");
+export const USER_CONFIG_DIR = getAgentDir();
+/** The documented user config file, alongside Pi's settings.json. */
+export const USER_CONFIG_PATH = join(USER_CONFIG_DIR, "ask-user.json");
 
 /** Built-in default key that toggles the overlay between hidden and visible. */
 export const DEFAULT_OVERLAY_TOGGLE_KEY = "alt+o";
+/** Cancel the current questionnaire's countdown without dismissing the UI. */
+export const CANCEL_TIMEOUT_KEY = "alt+q";
 /** Built-in default custom-UI presentation. */
 export const DEFAULT_DISPLAY_MODE: AskUserDisplayMode = "overlay";
 
@@ -129,7 +133,7 @@ const RESERVED_BASES = new Set([
 ]);
 /** Modifier chords that conflict with a questionnaire control. */
 const RESERVED_SIGNATURES = new Set(
-	["ctrl+c", "ctrl+d", "ctrl+u", "ctrl+p", "ctrl+n", "ctrl+enter"].map((id) => {
+	["ctrl+c", "ctrl+d", "ctrl+u", "ctrl+p", "ctrl+n", "ctrl+enter", CANCEL_TIMEOUT_KEY].map((id) => {
 		const parts = id.split("+");
 		const base = parts.pop()!;
 		return [...parts.sort(), base].join("+");

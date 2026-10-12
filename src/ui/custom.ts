@@ -2,6 +2,7 @@ import {
 	Input,
 	Key,
 	Markdown,
+	isKeyRelease,
 	matchesKey,
 	truncateToWidth,
 	visibleWidth,
@@ -10,6 +11,7 @@ import {
 import type { Component, Focusable, MarkdownTheme } from "@earendil-works/pi-tui";
 import { draftFromDefault, draftIsEmpty, emptyDraft, finalizeAnswers, type DraftAnswer } from "../answers.ts";
 import type { AskUserAnswer, Deadline, NormalizedQuestion, NormalizedRequest } from "../types.ts";
+import { CANCEL_TIMEOUT_KEY } from "../config.ts";
 
 /** Structural theme surface the component needs (a real Pi Theme satisfies it). */
 export interface AskUserTheme {
@@ -35,6 +37,8 @@ export interface CustomUIResult {
 export interface AskUserComponentOptions {
 	request: NormalizedRequest;
 	deadline: Deadline;
+	/** Disable the core deadline as well as this component's local timer. */
+	cancelTimeout?: () => boolean;
 	theme: AskUserTheme;
 	tui: AskUserTUI;
 	done: (result: CustomUIResult) => void;
@@ -132,6 +136,8 @@ function printableText(data: string): string | undefined {
 export class AskUserComponent implements Component, Focusable {
 	private readonly request: NormalizedRequest;
 	private readonly deadline: Deadline;
+	private readonly cancelTimeout: (() => boolean) | undefined;
+	private timeoutCancelled = false;
 	private readonly theme: AskUserTheme;
 	private readonly tui: AskUserTUI;
 	private readonly done: (result: CustomUIResult) => void;
@@ -164,6 +170,7 @@ export class AskUserComponent implements Component, Focusable {
 	constructor(options: AskUserComponentOptions) {
 		this.request = options.request;
 		this.deadline = options.deadline;
+		this.cancelTimeout = options.cancelTimeout;
 		this.theme = options.theme;
 		this.tui = options.tui;
 		this.done = options.done;
@@ -369,6 +376,14 @@ export class AskUserComponent implements Component, Focusable {
 	handleInput(data: string): void {
 		if (this.finished) return;
 
+		if (matchesKey(data, CANCEL_TIMEOUT_KEY)) {
+			if (isKeyRelease(data) || this.timeoutCancelled || this.deadline.expired()) return;
+			if (this.cancelTimeout && !this.cancelTimeout()) return;
+			this.timeoutCancelled = true;
+			this.dispose();
+			this.refresh();
+			return;
+		}
 		if (matchesKey(data, Key.escape)) {
 			this.finish({ kind: "cancelled" });
 			return;
@@ -574,6 +589,7 @@ export class AskUserComponent implements Component, Focusable {
 	}
 
 	private countdownLabel(): string {
+		if (this.timeoutCancelled) return "No timeout";
 		const hours = Math.floor(this.remainingSeconds / 3600);
 		const minutes = Math.floor((this.remainingSeconds % 3600) / 60);
 		const seconds = String(this.remainingSeconds % 60).padStart(2, "0");
@@ -789,13 +805,20 @@ export class AskUserComponent implements Component, Focusable {
 		return parts.join(" | ") + suffix;
 	}
 
-	private hintLine(): string {
-		const toggleHint = this.overlayToggleKey ? `${this.overlayToggleKey} hide` : undefined;
+	private hintLine(width: number): string {
+		// Keep cancellation controls discoverable even when contextual hints grow.
+		const controls = ["Esc cancel"];
+		if (!this.timeoutCancelled) controls.push(`${CANCEL_TIMEOUT_KEY} stop timer`);
+		if (this.overlayToggleKey) controls.push(`${this.overlayToggleKey} hide`);
+		const controlText = controls.join(" · ");
+		const withControls = (hints: string[]): string => {
+			const contextWidth = width - visibleWidth(controlText) - 3;
+			const context = contextWidth > 0 ? truncateToWidth(hints.join(" · "), contextWidth) : "";
+			return this.theme.fg("dim", context ? `${context} · ${controlText}` : controlText);
+		};
 		if (this.isReview) {
 			const reviewHints = ["↓ focus submit", "Enter submit", "Tab switch question"];
-			if (toggleHint) reviewHints.push(toggleHint);
-			reviewHints.push("Esc cancel");
-			return this.theme.fg("dim", reviewHints.join(" · "));
+			return withControls(reviewHints);
 		}
 		const question = this.currentQuestion();
 		const hints = ["Tab switch", "↑/↓ move", `Enter ${this.isInputRow() ? "confirm" : "select"}`];
@@ -803,9 +826,7 @@ export class AskUserComponent implements Component, Focusable {
 		if (question.hasDefault) hints.push("s use default");
 		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn preview");
 		if (this.isInputRow() && question.options.length > 0) hints.push("↑ back to options");
-		if (toggleHint) hints.push(toggleHint);
-		hints.push("Esc cancel");
-		return this.theme.fg("dim", hints.join(" · "));
+		return withControls(hints);
 	}
 
 	render(width: number): string[] {
@@ -853,7 +874,7 @@ export class AskUserComponent implements Component, Focusable {
 			? this.wrap(this.theme.fg("warning", `⚠ ${this.notice}`), contentWidth).slice(0, MAX_NOTICE_LINES)
 			: [];
 		const inputBlock = this.isReview ? this.renderSubmitBar(contentWidth) : this.renderInputBar(contentWidth);
-		const hintBlock = [this.hintLine()];
+		const hintBlock = [this.hintLine(contentWidth)];
 
 		let remaining = contentRows;
 		const take = (block: string[]): string[] => {

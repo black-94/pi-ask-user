@@ -92,9 +92,17 @@ export async function askUserNormalized(
 	const effectiveRequest = applyPreferences(request, host.preferences);
 	const deadline = createDeadline(effectiveRequest.totalTimeoutMs, now);
 	const deadlineController = new AbortController();
+	const timeoutCancelled = new AbortController();
 	const linked = combineSignals(signal, deadlineController.signal);
 
 	const input: AskUIInput = { request: effectiveRequest, deadline, signal: linked.signal };
+	if (route === "custom") {
+		input.cancelTimeout = () => {
+			if (!deadline.cancel()) return false;
+			timeoutCancelled.abort();
+			return true;
+		};
+	}
 	if (onUpdate) input.onUpdate = onUpdate;
 
 	// Wait events are emitted exactly around a real UI attempt: `waitStarted`
@@ -138,12 +146,14 @@ export async function askUserNormalized(
 	}
 
 	// The core owns the guarantee: even a renderer that ignores its AbortSignal
-	// cannot hang the call. The deadline and the caller's cancellation are raced
-	// independently against the renderer; a late renderer result is ignored.
+	// cannot hang the call unless the user explicitly disables the timeout.
+	// The deadline and caller's cancellation are raced independently against
+	// the renderer; a late renderer result is ignored.
 	let race: DeadlineRace;
 	try {
-		race = await raceWithDeadline(renderPromise, deadline.remainingMs(), signal, () =>
-			deadlineController.abort(),
+		race = await raceWithDeadline(
+			renderPromise, deadline.remainingMs(), signal,
+			() => deadlineController.abort(), timeoutCancelled.signal,
 		);
 	} finally {
 		// Always release the listeners installed on the caller's signal.
@@ -178,7 +188,8 @@ type DeadlineRace =
  *
  * This is what makes the timeout guarantee independent of renderer behaviour: a
  * renderer that never resolves (or that ignores its signal) still yields
- * `timeout`. Late results are discarded, and the rejection path is always
+ * `timeout`, unless the user explicitly cancels the timeout. Late results are
+ * discarded, and the rejection path is always
  * handled so a late failure cannot become an unhandled rejection.
  */
 function raceWithDeadline(
@@ -186,15 +197,23 @@ function raceWithDeadline(
 	remainingMs: number,
 	callerSignal: AbortSignal | undefined,
 	onDeadline: () => void,
+	timeoutCancelled: AbortSignal,
 ): Promise<DeadlineRace> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let abortHandler: (() => void) | undefined;
+	const clearDeadlineTimer = (): void => {
+		if (timer !== undefined) clearTimeout(timer);
+		timer = undefined;
+	};
 	const racers: Array<Promise<DeadlineRace>> = [
 		render.then(
 			(outcome): DeadlineRace => ({ kind: "outcome", outcome }),
 			(error): DeadlineRace => ({ kind: "outcome", outcome: { kind: "error", message: messageOf(error) } }),
 		),
 		new Promise<DeadlineRace>((resolve) => {
+			// Cancellation may happen synchronously during renderer construction.
+			if (timeoutCancelled.aborted) return;
+			timeoutCancelled.addEventListener("abort", clearDeadlineTimer, { once: true });
 			// `safeTimeoutMs` prevents a >32-bit delay from firing immediately.
 			timer = setTimeout(() => {
 				onDeadline();
@@ -215,7 +234,8 @@ function raceWithDeadline(
 		);
 	}
 	return Promise.race(racers).finally(() => {
-		if (timer) clearTimeout(timer);
+		clearDeadlineTimer();
+		timeoutCancelled.removeEventListener("abort", clearDeadlineTimer);
 		// Remove the listener when the render settled first, so repeated calls do
 		// not accumulate listeners on a long-lived caller signal.
 		if (abortHandler && callerSignal) callerSignal.removeEventListener("abort", abortHandler);

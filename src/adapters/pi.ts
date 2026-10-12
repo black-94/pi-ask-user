@@ -35,7 +35,9 @@ export interface PiHostOptions {
 	timeoutPerQuestionMs?: number;
 	/**
 	 * Path to the user config file, or `false` to skip reading it. Defaults to
-	 * `~/.pi/ask-user/config.json`. There are no environment variables.
+	 * `<Pi agent directory>/ask-user.json` (normally `~/.pi/agent/ask-user.json`).
+	 * The directory follows Pi's `PI_CODING_AGENT_DIR`; there are no AskUser-specific
+	 * environment-variable preferences.
 	 */
 	configFile?: string | false;
 }
@@ -195,6 +197,7 @@ export function createPiCustomRenderer(ui: ExtensionUIContext, options: PiCustom
 						component = new AskUserComponent({
 							request,
 							deadline,
+							cancelTimeout: input.cancelTimeout,
 							theme: theme as unknown as AskUserTheme,
 							tui,
 							done,
