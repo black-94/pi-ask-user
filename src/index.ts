@@ -38,6 +38,7 @@ export {
 	DEFAULT_TIMEOUT_PER_QUESTION_MS,
 	LIMITS,
 	MAX_OPTIONS,
+	MAX_FORM_FIELDS,
 	MAX_QUESTIONS,
 	normalizeAskUserRequest,
 } from "./schema.ts";
@@ -77,6 +78,7 @@ export {
 	emptyDraft,
 	finalizeAnswers,
 	toAnswer,
+	validateAnswer,
 	type DraftAnswer,
 	type FinalizeResult,
 } from "./answers.ts";
@@ -98,7 +100,7 @@ export interface AskUserToolDetails {
 	progress?: string;
 }
 
-const DESCRIPTION = "Ask the user one or more structured questions through the host's interactive UI.";
+const DESCRIPTION = "Ask the user structured single-choice, multi-choice, text, boolean, or flat form questions through the host's interactive UI.";
 
 const PROMPT_SNIPPET = "Ask the user structured questions when you would otherwise guess.";
 
@@ -106,6 +108,7 @@ const PROMPT_GUIDELINES = [
 	"Use ask_user when a choice is high-impact or ambiguous and you cannot infer the answer.",
 	"If the tool reports the UI could not run, ask the user the question yourself in ordinary text instead.",
 	"Never invent an answer; on aborted or timeout, report it plainly and do not re-ask.",
+	"Use kind=bool for a real boolean. Use kind=simple-form with flat uniquely named fields when several typed values belong in one logical question; forms cannot nest.",
 ];
 
 /**
@@ -136,6 +139,12 @@ function describeRequestAsText(request: NormalizedRequest): string {
 			const description = option.description?.trim();
 			lines.push(`   ${optionIndex + 1}) ${option.label}${description ? ` — ${description}` : ""}`);
 		});
+		if (question.kind === "bool") lines.push("   answer: true or false");
+		for (const field of question.fields ?? []) {
+			lines.push(`   - ${field.label} [${field.name}: ${field.kind}]${field.required ? " required" : " optional"}`);
+			field.options.forEach((option, optionIndex) => lines.push(`      ${optionIndex + 1}) ${option.label}`));
+			if (field.hasDefault) lines.push(`      default: ${JSON.stringify(field.default)}`);
+		}
 		if (question.hasDefault && question.default !== undefined) lines.push(`   default: ${question.default}`);
 	});
 	return lines.join("\n");
@@ -151,6 +160,10 @@ function buildModelContent(result: AskUserResult, request: NormalizedRequest): s
 	switch (result.status) {
 		case "answered": {
 			const lines = result.answers.map((answer) => {
+				if (answer.value !== undefined) {
+					const suffix = answer.usedDefault ? " (default used)" : "";
+					return `- ${answer.title}: ${JSON.stringify(answer.value)}${suffix}`;
+				}
 				const parts: string[] = [];
 				if (answer.selections.length > 0) parts.push(answer.selections.join(", "));
 				if (answer.freeText) parts.push(answer.freeText);

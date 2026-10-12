@@ -54,6 +54,9 @@ export function parseNativeAnswer(question: NormalizedQuestion, raw: string): Pa
 	if (question.kind === "input") {
 		return { ok: true, value: { selections: [], freeText: trimmed, empty: false } };
 	}
+	if (question.kind === "bool" || question.kind === "simple-form") {
+		return { ok: false, error: `${question.kind} uses typed native input and cannot be parsed as a legacy answer.` };
+	}
 
 	const pipeIndex = raw.indexOf("|");
 	const left = pipeIndex >= 0 ? raw.slice(0, pipeIndex) : raw;
@@ -115,5 +118,9 @@ export function nativeInputHint(question: NormalizedQuestion): string {
 				: "Free input. Reply with text to answer.";
 		case "input":
 			return "Free input. Reply with text to answer.";
+		case "bool":
+			return "Boolean. Reply with true or false.";
+		case "simple-form":
+			return "Form fields are asked one at a time.";
 	}
 }

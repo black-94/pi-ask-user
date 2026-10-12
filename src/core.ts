@@ -1,4 +1,5 @@
 import { combineSignals, createDeadline, safeTimeoutMs } from "./deadline.ts";
+import { validateAnswer } from "./answers.ts";
 import { AskUserValidationError, normalizeAskUserRequest } from "./schema.ts";
 import type {
 	AskUIInput,
@@ -272,7 +273,15 @@ function mapOutcome(
 ): AskUserResult {
 	switch (outcome.kind) {
 		case "submitted": {
-			const answers = outcome.answers ?? [];
+			if (!Array.isArray(outcome.answers)) {
+				return {
+					status: "error",
+					route,
+					answers: [],
+					error: { code: "internal", message: `${route} UI returned a malformed answers payload.` },
+				};
+			}
+			const answers = outcome.answers;
 			if (answers.length !== request.questions.length) {
 				return {
 					status: "error",
@@ -284,15 +293,23 @@ function mapOutcome(
 					},
 				};
 			}
-			const empty = answers.find(
-				(answer) => answer.selections.length === 0 && (answer.freeText ?? "").trim() === "",
-			);
-			if (empty) {
+			for (let index = 0; index < answers.length; index += 1) {
+				const answer = answers[index]!;
+				let invalid: string | undefined;
+				try {
+					invalid = validateAnswer(request.questions[index]!, answer);
+				} catch (error) {
+					invalid = `answer validation failed: ${messageOf(error)}`;
+				}
+				if (!invalid) continue;
 				return {
 					status: "error",
 					route,
 					answers,
-					error: { code: "empty_answer", message: `The answer to question "${empty.title}" is empty.` },
+					error: {
+						code: invalid.includes("empty") || invalid.includes("missing") ? "empty_answer" : "internal",
+						message: `The ${route} UI returned an invalid answer for question "${request.questions[index]!.title}": ${invalid}.`,
+					},
 				};
 			}
 			return { status: "answered", route, answers };

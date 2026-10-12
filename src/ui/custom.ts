@@ -9,8 +9,8 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { Component, Focusable, MarkdownTheme } from "@earendil-works/pi-tui";
-import { draftFromDefault, draftIsEmpty, emptyDraft, finalizeAnswers, type DraftAnswer } from "../answers.ts";
-import type { AskUserAnswer, Deadline, NormalizedQuestion, NormalizedRequest } from "../types.ts";
+import { draftFromDefault, draftIsEmpty, emptyDraft, finalizeAnswers, toAnswer, validateAnswer, type DraftAnswer } from "../answers.ts";
+import type { AskUserAnswer, AskUserFormValue, Deadline, NormalizedFormField, NormalizedQuestion, NormalizedRequest } from "../types.ts";
 import { CANCEL_TIMEOUT_KEY } from "../config.ts";
 
 /** Structural theme surface the component needs (a real Pi Theme satisfies it). */
@@ -119,6 +119,16 @@ function printableText(data: string): string | undefined {
 	return data;
 }
 
+interface FormUIState {
+	values: AskUserFormValue;
+	present: Set<string>;
+	usedDefaults: Set<string>;
+	inputs: Map<number, Input>;
+	optionCursors: number[];
+	clearedInputs: Set<number>;
+	active: number;
+}
+
 /**
  * Custom terminal UI for AskUser.
  *
@@ -144,6 +154,7 @@ export class AskUserComponent implements Component, Focusable {
 	private readonly drafts: DraftAnswer[];
 	private readonly cursors: number[];
 	private readonly inputs: Input[];
+	private readonly forms: Array<FormUIState | undefined>;
 	private readonly mdTheme: MarkdownTheme;
 	private readonly overlayToggleKey: string | undefined;
 	private readonly previewCache = new Map<string, Markdown>();
@@ -160,6 +171,8 @@ export class AskUserComponent implements Component, Focusable {
 	private cachedLines: string[] | undefined;
 	private previewScroll = 0;
 	private manualScroll = 0;
+	private formScroll: number | undefined;
+	private formOffset = 0;
 	private viewport: { wide: boolean; maxBody: number; maxScroll: number } = {
 		wide: false,
 		maxBody: 1,
@@ -186,6 +199,41 @@ export class AskUserComponent implements Component, Focusable {
 				placeholderStyle: (text) => this.theme.fg("muted", text),
 			}),
 		);
+		this.forms = options.request.questions.map((question, questionIndex) => {
+			if (question.kind !== "simple-form") return undefined;
+			const values: AskUserFormValue = {};
+			const present = new Set<string>();
+			const usedDefaults = new Set<string>();
+			const fieldInputs = new Map<number, Input>();
+			const fields = question.fields ?? [];
+			fields.forEach((field, fieldIndex) => {
+				if (field.hasDefault && field.default !== undefined) {
+					values[field.name] = Array.isArray(field.default) ? [...field.default] : field.default;
+					present.add(field.name);
+					usedDefaults.add(field.name);
+				}
+				if (field.kind === "input") {
+					const input = new Input({
+						prompt: "",
+						placeholder: field.required ? "Required" : "Optional; leave empty to omit",
+						placeholderStyle: (text) => this.theme.fg("muted", text),
+					});
+					if (typeof field.default === "string") input.setValue(field.default);
+					fieldInputs.set(fieldIndex, input);
+				}
+			});
+			this.drafts[questionIndex] = {
+				selections: [], freeText: "", value: { ...values }, valueSet: true, usedDefault: usedDefaults.size > 0,
+			};
+			const optionCursors = fields.map((field) => {
+				if (field.kind === "bool" && field.default === false) return 1;
+				if (field.kind === "single" && typeof field.default === "string") {
+					return Math.max(0, field.options.findIndex((option) => option.label === field.default));
+				}
+				return 0;
+			});
+			return { values, present, usedDefaults, inputs: fieldInputs, optionCursors, clearedInputs: new Set(), active: 0 };
+		});
 		const remaining = Math.max(0, this.deadline.remainingMs());
 		this.remainingSeconds = Math.ceil(remaining / 1000);
 		this.timer = setTimeout(() => this.finish({ kind: "timeout" }), remaining);
@@ -241,6 +289,7 @@ export class AskUserComponent implements Component, Focusable {
 		this.cachedWidth = undefined;
 		this.cachedRows = undefined;
 		for (const input of this.inputs) input.invalidate();
+		for (const form of this.forms) for (const input of form?.inputs.values() ?? []) input.invalidate();
 		for (const markdown of this.previewCache.values()) markdown.invalidate();
 	}
 
@@ -252,6 +301,7 @@ export class AskUserComponent implements Component, Focusable {
 	private resetScroll(): void {
 		this.previewScroll = 0;
 		this.manualScroll = 0;
+		this.formScroll = undefined;
 	}
 
 	// -- tab helpers ---------------------------------------------------------
@@ -273,6 +323,8 @@ export class AskUserComponent implements Component, Focusable {
 	}
 
 	private rowCount(question: NormalizedQuestion): number {
+		if (question.kind === "bool") return 2;
+		if (question.kind === "simple-form") return (question.fields?.length ?? 0) + 1;
 		return question.options.length + 1;
 	}
 
@@ -284,6 +336,7 @@ export class AskUserComponent implements Component, Focusable {
 
 	private isInputRow(): boolean {
 		if (this.isReview) return false;
+		if (this.currentQuestion().kind === "bool" || this.currentQuestion().kind === "simple-form") return false;
 		return this.rowIndex() >= this.currentQuestion().options.length;
 	}
 
@@ -326,7 +379,45 @@ export class AskUserComponent implements Component, Focusable {
 	}
 
 	private syncAllDrafts(): void {
-		for (let index = 0; index < this.inputs.length; index += 1) this.syncDraftFromInput(index);
+		for (let index = 0; index < this.inputs.length; index += 1) {
+			if (this.request.questions[index]?.kind === "simple-form") this.syncFormDraft(index);
+			else this.syncDraftFromInput(index);
+		}
+	}
+
+	private syncFormInput(questionIndex: number, fieldIndex: number, edited = false): void {
+		const question = this.request.questions[questionIndex];
+		const form = this.forms[questionIndex];
+		const field = question?.fields?.[fieldIndex];
+		const input = form?.inputs.get(fieldIndex);
+		if (!question || !form || !field || !input) return;
+		if (edited) form.usedDefaults.delete(field.name);
+		const text = form.usedDefaults.has(field.name) ? input.getValue() : input.getValue().trim();
+		if (edited && text === "") form.clearedInputs.add(fieldIndex);
+		else if (edited) form.clearedInputs.delete(fieldIndex);
+		if (text === "" && (!field.hasDefault || form.clearedInputs.has(fieldIndex))) {
+			delete form.values[field.name];
+			form.present.delete(field.name);
+		} else {
+			form.values[field.name] = text;
+			form.present.add(field.name);
+		}
+	}
+
+	private syncFormDraft(questionIndex: number): void {
+		const question = this.request.questions[questionIndex];
+		const form = this.forms[questionIndex];
+		if (!question || !form) return;
+		for (const fieldIndex of form.inputs.keys()) this.syncFormInput(questionIndex, fieldIndex);
+		const value: AskUserFormValue = {};
+		for (const field of question.fields ?? []) {
+			if (!form.present.has(field.name)) continue;
+			const fieldValue = form.values[field.name];
+			if (fieldValue !== undefined) value[field.name] = Array.isArray(fieldValue) ? [...fieldValue] : fieldValue;
+		}
+		this.drafts[questionIndex] = {
+			selections: [], freeText: "", value, valueSet: true, usedDefault: form.usedDefaults.size > 0,
+		};
 	}
 
 	/** Forward a key to the input and drop `usedDefault` if the text changed. */
@@ -342,7 +433,9 @@ export class AskUserComponent implements Component, Focusable {
 	private scrollBy(direction: -1 | 1): void {
 		if (this.viewport.maxScroll <= 0) return;
 		const page = Math.max(1, this.viewport.maxBody - 1);
-		if (this.viewport.wide) {
+		if (!this.isReview && this.currentQuestion().kind === "simple-form") {
+			this.formScroll = clamp((this.formScroll ?? this.formOffset) + direction * page, 0, this.viewport.maxScroll);
+		} else if (this.viewport.wide) {
 			this.previewScroll = clamp(this.previewScroll + direction * page, 0, this.viewport.maxScroll);
 		} else {
 			this.manualScroll = clamp(this.manualScroll + direction * page, 0, this.viewport.maxScroll);
@@ -359,7 +452,9 @@ export class AskUserComponent implements Component, Focusable {
 			this.scrollBy(1);
 			return true;
 		}
-		if (this.isInputRow()) return false;
+		const form = this.forms[this.tab];
+		const formField = !this.isReview ? this.currentQuestion().fields?.[form?.active ?? -1] : undefined;
+		if (this.isInputRow() || formField?.kind === "input") return false;
 		if (matchesKey(data, "ctrl+u") || data === "[") {
 			this.scrollBy(-1);
 			return true;
@@ -369,6 +464,115 @@ export class AskUserComponent implements Component, Focusable {
 			return true;
 		}
 		return false;
+	}
+
+	private moveFormFocus(delta: number): void {
+		const form = this.forms[this.tab];
+		const question = this.currentQuestion();
+		if (!form) return;
+		this.syncFormDraft(this.tab);
+		const slots = (question.fields?.length ?? 0) + 1;
+		form.active = (form.active + delta + slots) % slots;
+		this.notice = undefined;
+		this.resetScroll();
+		this.refresh();
+	}
+
+	private setFormValue(field: NormalizedFormField, value: boolean | string | string[], fieldIndex: number): void {
+		const form = this.forms[this.tab]!;
+		form.values[field.name] = Array.isArray(value) ? [...value] : value;
+		form.present.add(field.name);
+		form.usedDefaults.delete(field.name);
+		if (field.kind === "input") form.clearedInputs.delete(fieldIndex);
+		this.notice = undefined;
+	}
+
+	private advanceFormField(): void {
+		const form = this.forms[this.tab]!;
+		const fields = this.currentQuestion().fields ?? [];
+		form.active = Math.min(fields.length, form.active + 1);
+		this.resetScroll();
+		this.refresh();
+	}
+
+	private commitForm(): void {
+		this.syncFormDraft(this.tab);
+		const question = this.currentQuestion();
+		const invalid = validateAnswer(question, toAnswer(question, this.drafts[this.tab]!));
+		if (invalid) {
+			const fields = question.fields ?? [];
+			const missing = fields.findIndex((field) => invalid.includes(`"${field.name}"`));
+			const form = this.forms[this.tab]!;
+			form.active = missing >= 0 ? missing : 0;
+			this.notice = `Complete the form first: ${invalid}.`;
+			this.resetScroll();
+			this.refresh();
+			return;
+		}
+		this.notice = undefined;
+		this.advance();
+	}
+
+	private handleFormInput(data: string): void {
+		const question = this.currentQuestion();
+		const fields = question.fields ?? [];
+		const form = this.forms[this.tab]!;
+		if (form.active >= fields.length) {
+			if (matchesKey(data, Key.enter) || matchesKey(data, Key.space)) this.commitForm();
+			return;
+		}
+		const fieldIndex = form.active;
+		const field = fields[fieldIndex]!;
+		this.resetScroll();
+		let cursor = form.optionCursors[fieldIndex] ?? 0;
+		if (field.kind === "input") {
+			if (matchesKey(data, Key.enter)) {
+				this.syncFormInput(this.tab, fieldIndex);
+				this.advanceFormField();
+				return;
+			}
+			const input = form.inputs.get(fieldIndex)!;
+			const before = input.getValue();
+			input.handleInput(data);
+			this.syncFormInput(this.tab, fieldIndex, input.getValue() !== before);
+			this.syncFormDraft(this.tab);
+			this.refresh();
+			return;
+		}
+		if (field.kind === "bool") {
+			if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) cursor = 0;
+			else if (matchesKey(data, Key.right) || matchesKey(data, Key.down)) cursor = 1;
+			else if (matchesKey(data, Key.space)) {
+				this.setFormValue(field, cursor === 0, fieldIndex);
+			} else if (matchesKey(data, Key.enter)) {
+				this.setFormValue(field, cursor === 0, fieldIndex);
+				this.advanceFormField();
+				return;
+			} else return;
+			form.optionCursors[fieldIndex] = cursor;
+			this.syncFormDraft(this.tab);
+			this.refresh();
+			return;
+		}
+		if (matchesKey(data, Key.up) || matchesKey(data, Key.left)) cursor = clamp(cursor - 1, 0, field.options.length - 1);
+		else if (matchesKey(data, Key.down) || matchesKey(data, Key.right)) cursor = clamp(cursor + 1, 0, field.options.length - 1);
+		else if (matchesKey(data, Key.space)) {
+			if (field.kind === "single") this.setFormValue(field, field.options[cursor]!.label, fieldIndex);
+			else {
+				const current = Array.isArray(form.values[field.name]) ? [...form.values[field.name] as string[]] : [];
+				const label = field.options[cursor]!.label;
+				const next = current.includes(label) ? current.filter((entry) => entry !== label) : [...current, label];
+				this.setFormValue(field, field.options.filter((option) => next.includes(option.label)).map((option) => option.label), fieldIndex);
+			}
+		} else if (matchesKey(data, Key.enter)) {
+			if (field.kind === "single") this.setFormValue(field, field.options[cursor]!.label, fieldIndex);
+			this.advanceFormField();
+			return;
+		} else return;
+		form.optionCursors[fieldIndex] = cursor;
+		this.syncFormDraft(this.tab);
+		this.resetScroll();
+		this.refresh();
 	}
 
 	// -- key handling --------------------------------------------------------
@@ -390,6 +594,27 @@ export class AskUserComponent implements Component, Focusable {
 		}
 		if (matchesKey(data, "ctrl+enter")) {
 			this.submitAll();
+			return;
+		}
+		if (matchesKey(data, "ctrl+left")) {
+			this.moveTab(-1);
+			return;
+		}
+		if (matchesKey(data, "ctrl+right")) {
+			this.moveTab(1);
+			return;
+		}
+		if (!this.isReview && this.currentQuestion().kind === "simple-form") {
+			if (matchesKey(data, "shift+tab")) {
+				this.moveFormFocus(-1);
+				return;
+			}
+			if (matchesKey(data, Key.tab)) {
+				this.moveFormFocus(1);
+				return;
+			}
+			if (this.isScrollKey(data)) return;
+			this.handleFormInput(data);
 			return;
 		}
 		if (matchesKey(data, "shift+tab")) {
@@ -416,6 +641,31 @@ export class AskUserComponent implements Component, Focusable {
 		}
 
 		const question = this.currentQuestion();
+		if (question.kind === "bool") {
+			if (matchesKey(data, Key.up) || matchesKey(data, Key.left) || matchesKey(data, "ctrl+p")) {
+				this.cursors[this.tab] = 0;
+				this.refresh();
+				return;
+			}
+			if (matchesKey(data, Key.down) || matchesKey(data, Key.right) || matchesKey(data, "ctrl+n")) {
+				this.cursors[this.tab] = 1;
+				this.refresh();
+				return;
+			}
+			if (matchesKey(data, "s")) {
+				this.skipWithDefault();
+				return;
+			}
+			if (matchesKey(data, Key.space) || matchesKey(data, Key.enter)) {
+				this.drafts[this.tab] = {
+					selections: [], freeText: "", usedDefault: false, value: this.rowIndex() === 0, valueSet: true,
+				};
+				this.notice = undefined;
+				if (matchesKey(data, Key.enter)) this.advance();
+				else this.refresh();
+			}
+			return;
+		}
 		if (question.kind === "input") {
 			this.cursors[this.tab] = question.options.length;
 		}
@@ -573,6 +823,14 @@ export class AskUserComponent implements Component, Focusable {
 			this.reviewButtonFocused = false;
 			this.cursors[first] = 0;
 			this.notice = `Question ${first + 1} has no answer yet; answer it first.`;
+			const question = this.request.questions[first]!;
+			const form = this.forms[first];
+			if (form) {
+				const invalid = validateAnswer(question, toAnswer(question, this.drafts[first]!));
+				const fieldIndex = question.fields?.findIndex((field) => invalid?.includes(`"${field.name}"`)) ?? -1;
+				form.active = fieldIndex >= 0 ? fieldIndex : 0;
+				if (invalid) this.notice = `Complete the form first: ${invalid}.`;
+			}
 			this.resetScroll();
 			this.refresh();
 			return;
@@ -646,7 +904,7 @@ export class AskUserComponent implements Component, Focusable {
 		const chips: string[] = [];
 		this.request.questions.forEach((question, index) => {
 			const draft = this.drafts[index]!;
-			const answered = !draftIsEmpty(draft) || question.hasDefault;
+			const answered = validateAnswer(question, toAnswer(question, draft)) === undefined || question.hasDefault;
 			const marker = answered ? "●" : "○";
 			const label = truncateToWidth(question.title, TAB_LABEL_WIDTH);
 			const chip = `${marker} ${index + 1}.${label}`;
@@ -686,9 +944,28 @@ export class AskUserComponent implements Component, Focusable {
 		return lines;
 	}
 
+	private renderBoolOptions(width: number): { lines: string[]; focusLine: number } {
+		const draft = this.drafts[this.tab]!;
+		const row = this.rowIndex();
+		const selected = draft.valueSet ? draft.value : undefined;
+		const choices: Array<{ value: boolean; mark: string; label: string }> = [
+			{ value: true, mark: "✓", label: "True" },
+			{ value: false, mark: "✗", label: "False" },
+		];
+		const lines = choices.map((choice, index) => {
+			const cursor = index === row ? this.theme.fg("accent", "▸") : " ";
+			const chosen = selected === choice.value;
+			const control = chosen ? this.theme.fg(choice.value ? "success" : "error", `[${choice.mark}]`) : this.theme.fg("muted", `[ ] ${choice.mark}`);
+			const label = index === row ? this.theme.bold(this.theme.fg("accent", choice.label)) : choice.label;
+			return truncateToWidth(`  ${cursor} ${control} ${label}`, width);
+		});
+		return { lines, focusLine: row };
+	}
+
 	/** Options only (no input row): the input stays pinned outside the body. */
 	private renderOptions(width: number): { lines: string[]; focusLine: number } {
 		const question = this.currentQuestion();
+		if (question.kind === "bool") return this.renderBoolOptions(width);
 		const lines: string[] = [];
 		let focusLine = 0;
 		for (let index = 0; index < question.options.length; index += 1) {
@@ -696,6 +973,86 @@ export class AskUserComponent implements Component, Focusable {
 			lines.push(...this.renderOptionRow(question, index, width));
 		}
 		return { lines: lines.map((line) => truncateToWidth(line, width)), focusLine };
+	}
+
+	private formValueText(value: boolean | string | string[] | undefined): string {
+		if (value === undefined) return "(unset)";
+		if (typeof value === "boolean") return value ? "✓ True" : "✗ False";
+		if (Array.isArray(value)) return value.length > 0 ? value.join(", ") : "(none selected)";
+		return value === "" ? "(empty)" : value;
+	}
+
+	private renderFormProjection(width: number): { lines: string[]; focusLine: number } {
+		const question = this.currentQuestion();
+		const fields = question.fields ?? [];
+		const form = this.forms[this.tab]!;
+		const lines: string[] = [];
+		let focusLine = 0;
+		fields.forEach((field, fieldIndex) => {
+			const active = form.active === fieldIndex;
+			if (active) focusLine = lines.length;
+			const pointer = active ? this.theme.fg("accent", "▸") : " ";
+			const required = field.required ? this.theme.fg("error", " *") : "";
+			const defaultMark = form.usedDefaults.has(field.name) ? this.theme.fg("muted", " (default)") : "";
+			lines.push(truncateToWidth(`${pointer} ${this.theme.bold(field.label)}${required}${defaultMark}`, width));
+
+			if (!active) {
+				lines.push(truncateToWidth(this.theme.fg("muted", `    ${this.formValueText(form.present.has(field.name) ? form.values[field.name] : undefined)}`), width));
+				return;
+			}
+			if (field.kind === "input") {
+				const input = form.inputs.get(fieldIndex)!;
+				input.focused = this.focused;
+				const indent = " ".repeat(Math.min(4, Math.max(0, width - 1)));
+				const [line = ""] = input.render(Math.max(1, width - indent.length));
+				focusLine = lines.length;
+				lines.push(truncateToWidth(`${indent}${line}`, width));
+				return;
+			}
+			if (field.kind === "bool") {
+				const value = form.present.has(field.name) ? form.values[field.name] : undefined;
+				const cursor = form.optionCursors[fieldIndex] ?? 0;
+				for (const [choiceIndex, choice] of [true, false].entries()) {
+					if (cursor === choiceIndex) focusLine = lines.length;
+					const at = cursor === choiceIndex ? this.theme.fg("accent", "▸") : " ";
+					const selected = value === choice;
+					const mark = choice ? "✓" : "✗";
+					const box = selected ? this.theme.fg(choice ? "success" : "error", `[${mark}]`) : this.theme.fg("muted", `[ ] ${mark}`);
+					lines.push(truncateToWidth(`    ${at} ${box} ${choice ? "True" : "False"}`, width));
+				}
+				return;
+			}
+
+			const cursor = form.optionCursors[fieldIndex] ?? 0;
+			const current = form.values[field.name];
+			field.options.forEach((option, optionIndex) => {
+				if (cursor === optionIndex) focusLine = lines.length;
+				const at = cursor === optionIndex ? this.theme.fg("accent", "▸") : " ";
+				const selected = field.kind === "single" ? current === option.label : Array.isArray(current) && current.includes(option.label);
+				const box = field.kind === "single" ? (selected ? "◉" : "○") : (selected ? "▣" : "▢");
+				lines.push(truncateToWidth(`    ${at} ${selected ? this.theme.fg("success", box) : this.theme.fg("muted", box)} ${option.label}`, width));
+				if (option.description) lines.push(...this.wrap(this.theme.fg("muted", `        ${option.description}`), width));
+			});
+			const selectedOption = field.options[cursor];
+			if (selectedOption?.preview?.trim()) {
+				lines.push(this.theme.fg("muted", "    Preview:"));
+				lines.push(...this.markdownFor(selectedOption.preview).render(Math.max(1, width - 4)).map((line) => `    ${line}`));
+			}
+		});
+		if (form.active >= fields.length) focusLine = lines.length;
+		const action = this.request.questions.length === 1 ? "Submit" : "Continue";
+		const button = form.active >= fields.length ? this.theme.inverse?.(` [ Enter ${action} ] `) ?? `[ Enter ${action} ]` : `[ Enter ${action} ]`;
+		lines.push(truncateToWidth(`${form.active >= fields.length ? this.theme.fg("accent", "▸") : " "} ${this.theme.fg("accent", button)}`, width));
+		return { lines: lines.map((line) => truncateToWidth(line, width)), focusLine };
+	}
+
+	private renderFormBody(width: number, height: number): string[] {
+		const projection = this.renderFormProjection(width);
+		const maxScroll = Math.max(0, projection.lines.length - height);
+		this.viewport = { wide: false, maxBody: height, maxScroll };
+		if (this.formScroll !== undefined) this.formScroll = clamp(this.formScroll, 0, maxScroll);
+		this.formOffset = this.formScroll ?? this.autoOffset(projection.lines.length, projection.focusLine, height);
+		return projection.lines.slice(this.formOffset, this.formOffset + height);
 	}
 
 	private renderBodyArea(width: number, height: number): string[] {
@@ -707,6 +1064,7 @@ export class AskUserComponent implements Component, Focusable {
 			this.manualScroll = clamp(this.manualScroll, 0, maxScroll);
 			return lines.slice(this.manualScroll, this.manualScroll + height);
 		}
+		if (this.currentQuestion().kind === "simple-form") return this.renderFormBody(width, height);
 
 		const preview = this.currentPreview();
 		const wide = preview.trim() !== "" && width >= SPLIT_MIN_WIDTH;
@@ -758,6 +1116,7 @@ export class AskUserComponent implements Component, Focusable {
 
 	/** The free-input row, rendered as a fixed line that never scrolls away. */
 	private renderInputBar(width: number): string[] {
+		if (this.currentQuestion().kind === "bool" || this.currentQuestion().kind === "simple-form") return [];
 		const input = this.inputs[this.tab]!;
 		input.focused = this.focused && this.isInputRow();
 		return input
@@ -781,7 +1140,7 @@ export class AskUserComponent implements Component, Focusable {
 		const lines: string[] = [];
 		this.request.questions.forEach((question, index) => {
 			const draft = this.drafts[index]!;
-			const answered = !draftIsEmpty(draft) || question.hasDefault;
+			const answered = validateAnswer(question, toAnswer(question, draft)) === undefined || question.hasDefault;
 			const mark = answered ? this.theme.fg("success", "✓") : this.theme.fg("warning", "!");
 			lines.push(truncateToWidth(`${mark} ${this.theme.bold(`${index + 1}. ${question.title}`)}`, width));
 			lines.push(truncateToWidth(this.theme.fg("muted", `   ${this.describeDraft(question, draft)}`), width));
@@ -790,6 +1149,13 @@ export class AskUserComponent implements Component, Focusable {
 	}
 
 	private describeDraft(question: NormalizedQuestion, draft: DraftAnswer): string {
+		if (question.kind === "bool" && draft.valueSet && typeof draft.value === "boolean") {
+			return `${draft.value ? "True" : "False"}${draft.usedDefault ? " (default)" : ""}`;
+		}
+		if (question.kind === "simple-form" && draft.valueSet && draft.value && typeof draft.value === "object") {
+			const entries = Object.entries(draft.value).map(([name, value]) => `${name}=${this.formValueText(value)}`);
+			return `${entries.length > 0 ? entries.join("; ") : "(optional fields omitted)"}${draft.usedDefault ? " (includes defaults)" : ""}`;
+		}
 		const parts: string[] = [];
 		if (draft.selections.length > 0) {
 			parts.push(draft.selections.map((index) => question.options[index]?.label ?? `#${index + 1}`).join(", "));
@@ -821,6 +1187,22 @@ export class AskUserComponent implements Component, Focusable {
 			return withControls(reviewHints);
 		}
 		const question = this.currentQuestion();
+		if (question.kind === "simple-form") {
+			const hints = ["Tab next field", "Shift+Tab previous", "Ctrl+←/→ question"];
+			const form = this.forms[this.tab]!;
+			const field = question.fields?.[form.active];
+			if (field?.kind === "multi") hints.push("Space toggle", "Enter next");
+			else if (field?.kind === "bool") hints.push("←/→ choose", "Space set", "Enter next");
+			else if (field) hints.push("Enter next");
+			else hints.push("Enter continue");
+			if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn scroll");
+			return withControls(hints);
+		}
+		if (question.kind === "bool") {
+			const hints = ["↑/↓ choose", "Space set", "Enter confirm", "Tab switch"];
+			if (question.hasDefault) hints.push("s use default");
+			return withControls(hints);
+		}
 		const hints = ["Tab switch", "↑/↓ move", `Enter ${this.isInputRow() ? "confirm" : "select"}`];
 		if (question.kind === "multi") hints.push("Space multi-select");
 		if (question.hasDefault) hints.push("s use default");
@@ -877,9 +1259,11 @@ export class AskUserComponent implements Component, Focusable {
 		const hintBlock = [this.hintLine(contentWidth)];
 
 		let remaining = contentRows;
+		const typedQuestion = !this.isReview && (this.currentQuestion().kind === "simple-form" || this.currentQuestion().kind === "bool");
+		const reserveBody = typedQuestion && contentRows > 0 ? 1 : 0;
 		const take = (block: string[]): string[] => {
-			if (remaining <= 0 || block.length === 0) return [];
-			const use = Math.min(block.length, remaining);
+			if (remaining <= reserveBody || block.length === 0) return [];
+			const use = Math.min(block.length, remaining - reserveBody);
 			remaining -= use;
 			return block.slice(0, use);
 		};

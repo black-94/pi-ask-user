@@ -5,8 +5,8 @@
  * answered through one of two routes:
  *
  *  - `custom` — a custom terminal UI (only a real Pi TUI)
- *  - `native` — native input dialogs (`ctx.hasUI` + callable input), one question
- *    at a time
+ *  - `native` — native input dialogs (`ctx.hasUI` + callable input), one logical
+ *    question at a time (a form uses sequential per-field dialogs)
  *
  * The route is resolved **once, when the host adapter is created**, from
  * trustworthy inputs only:
@@ -25,7 +25,10 @@
  */
 
 /** The kind of question. */
-export type QuestionKind = "single" | "multi" | "input";
+export type QuestionKind = "single" | "multi" | "input" | "bool" | "simple-form";
+
+/** The non-nesting field kinds accepted by a `simple-form` question. */
+export type FormFieldKind = Exclude<QuestionKind, "simple-form">;
 
 /** Custom-UI presentation: floating overlay or inline prompt area. */
 export type AskUserDisplayMode = "overlay" | "inline";
@@ -40,24 +43,97 @@ export interface AskUserOption {
 	preview?: string;
 }
 
-/** One question in a questionnaire. */
-export interface AskUserQuestion {
+interface AskUserFormFieldBase {
+	/** Literal output key: 1..64 ASCII letters/digits/`_`/`-`, starting with a letter or `_`. */
+	name: string;
+	/** Label shown beside the field. */
+	label: string;
+	/** When true, an explicit non-empty value (or a valid default) is required. */
+	required?: boolean;
+}
+
+export interface AskUserBoolField extends AskUserFormFieldBase {
+	kind: "bool";
+	options?: never;
+	default?: boolean;
+}
+
+export interface AskUserSingleField extends AskUserFormFieldBase {
+	kind: "single";
+	options: AskUserOption[];
+	default?: string;
+}
+
+export interface AskUserMultiField extends AskUserFormFieldBase {
+	kind: "multi";
+	options: AskUserOption[];
+	default?: string[];
+}
+
+export interface AskUserInputField extends AskUserFormFieldBase {
+	kind: "input";
+	options?: never;
+	default?: string;
+}
+
+/** One non-nesting, kind-typed field in a flat `simple-form` question. */
+export type AskUserFormField = AskUserBoolField | AskUserSingleField | AskUserMultiField | AskUserInputField;
+
+/** Flat typed value returned by a `simple-form`. */
+export type AskUserFormValue = Record<string, boolean | string | string[]>;
+
+interface AskUserQuestionBase {
 	/** Stable id. Generated (`q1`, `q2`, ...) when omitted. */
 	id?: string;
 	/** Question heading (required). */
 	title: string;
 	/** Optional extra hint or context rendered under the heading. */
 	prompt?: string;
-	/** `single` = choose one, `multi` = choose several, `input` = free text only. */
-	kind: QuestionKind;
-	/** 1..5 options. Required for `single`/`multi`; ignored for `input`. */
-	options?: AskUserOption[];
-	/**
-	 * Default answer. When present the question may be skipped and the default
-	 * is used; when absent the question must be answered.
-	 */
-	default?: string;
 }
+
+export interface AskUserSingleQuestion extends AskUserQuestionBase {
+	kind: "single";
+	options: AskUserOption[];
+	default?: string;
+	fields?: never;
+}
+
+export interface AskUserMultiQuestion extends AskUserQuestionBase {
+	kind: "multi";
+	options: AskUserOption[];
+	default?: string;
+	fields?: never;
+}
+
+export interface AskUserInputQuestion extends AskUserQuestionBase {
+	kind: "input";
+	/** Kept for legacy callers: validated by normalization, then dropped. */
+	options?: AskUserOption[];
+	default?: string;
+	fields?: never;
+}
+
+export interface AskUserBoolQuestion extends AskUserQuestionBase {
+	kind: "bool";
+	options?: never;
+	default?: boolean;
+	fields?: never;
+}
+
+export interface AskUserSimpleFormQuestion extends AskUserQuestionBase {
+	kind: "simple-form";
+	options?: never;
+	default?: never;
+	fields: AskUserFormField[];
+}
+
+/** One kind-typed question in a questionnaire. */
+export type AskUserQuestion =
+	| AskUserSingleQuestion
+	| AskUserMultiQuestion
+	| AskUserInputQuestion
+	| AskUserBoolQuestion
+	| AskUserSimpleFormQuestion;
 
 /** A model-facing (or caller-facing) request. */
 export interface AskUserRequest {
@@ -88,6 +164,8 @@ export interface AskUserAnswer {
 	freeText?: string;
 	/** True when the answer came from the question default rather than user input. */
 	usedDefault: boolean;
+	/** Typed value for `bool` and `simple-form`. `false` is a complete answer. */
+	value?: boolean | AskUserFormValue;
 }
 
 /**
@@ -325,7 +403,19 @@ export interface NormalizedQuestion {
 	prompt?: string;
 	kind: QuestionKind;
 	options: AskUserOption[];
-	default?: string;
+	default?: string | boolean;
+	hasDefault: boolean;
+	/** Present for `simple-form`; omitted by older already-normalized callers. */
+	fields?: NormalizedFormField[];
+}
+
+export interface NormalizedFormField {
+	name: string;
+	label: string;
+	kind: FormFieldKind;
+	required: boolean;
+	options: AskUserOption[];
+	default?: boolean | string | string[];
 	hasDefault: boolean;
 }
 

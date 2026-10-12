@@ -1,8 +1,8 @@
 # @black942026/pi-ask-user
 
 A Pi extension for asking structured questions through interactive terminal
-or native input dialogs. Supports single-choice, multiple-choice, and free-text
-answers, with configurable timeouts and cancellation.
+or native input dialogs. Supports single-choice, multiple-choice, free-text,
+boolean, and flat typed form answers, with configurable timeouts and cancellation.
 
 Install the package to add the **`ask_user`** tool to Pi. Other extensions can
 reuse the same interaction through the TypeScript API.
@@ -17,8 +17,8 @@ is created:
 
 | Route | Runs when | The user sees |
 | --- | --- | --- |
-| `custom` | the host is a real Pi TUI with a bound renderer | a tabbed terminal dialog: options, a pinned free-input row, and a Markdown preview |
-| `native` | `ctx.hasUI` with a callable `ctx.ui.input` (TUI, RPC/ACP) | native input dialogs, one question at a time (invalid input re-prompts) |
+| `custom` | the host is a real Pi TUI with a bound renderer | a tabbed terminal dialog: options, boolean controls, forms, text input, and Markdown previews |
+| `native` | `ctx.hasUI` with a callable `ctx.ui.input` (TUI, RPC/ACP) | native dialogs, one logical question at a time; form fields are sequential dialogs |
 
 Only these two routes exist, and the route belongs to the host: it is configured
 or probed when the host is created, never per request.
@@ -45,9 +45,16 @@ The registered tool name is exactly **`ask_user`**.
 | `questions` | `Question[]` | 1–5 questions (required) |
 | `questions[].title` | `string` | heading (required) |
 | `questions[].prompt` | `string?` | extra hint under the heading |
-| `questions[].kind` | `"single" \| "multi" \| "input"?` | inferred from `options` when omitted: present ⇒ `single`, absent ⇒ `input`; `multi` is explicit |
-| `questions[].options` | `Option[]?` | 1–5 × `{ label, description?, preview? }`; required for `single`/`multi`, ignored for `input` |
-| `questions[].default` | `string?` | makes the question skippable |
+| `questions[].kind` | `"single" \| "multi" \| "input" \| "bool" \| "simple-form"?` | inferred from `options` when omitted: present ⇒ `single`, absent ⇒ `input`; other kinds are explicit |
+| `questions[].options` | `Option[]?` | 1–5 × `{ label, description?, preview? }`; required for `single`/`multi`, validated then dropped for legacy `input`, rejected for `bool`/`simple-form` |
+| `questions[].default` | `(string \| boolean)?` | string for legacy kinds, boolean for `bool`; `simple-form` uses field defaults |
+| `questions[].fields` | `FormField[]?` | required only for `simple-form`; 1–10 flat fields, never nested |
+| `fields[].name` | `string` | unique literal output key, 1–64 ASCII letters/digits/`_`/`-`, starting with a letter or `_` |
+| `fields[].label` | `string` | field label (required) |
+| `fields[].kind` | `"bool" \| "single" \| "multi" \| "input"` | exact non-nesting field kind |
+| `fields[].required` | `boolean?` | default `false`; `false` is a valid answered boolean |
+| `fields[].options` | `Option[]?` | required for field `single`/`multi`, rejected for field `bool`/`input` |
+| `fields[].default` | `(boolean \| string \| string[])?` | boolean, selected label, selected-label array, or text according to field kind |
 | `questions[].id` | `string?` | non-empty; generated as `q1`, `q2`, … when omitted |
 | `header` | `string?` | heading above the questionnaire |
 | `displayMode` | `"overlay" \| "inline"?` | custom route only; default `overlay`; a user-configured preference overrides it |
@@ -55,20 +62,50 @@ The registered tool name is exactly **`ask_user`**.
 
 These fields are the whole input contract, for the tool and for direct calls
 alike. Unknown fields, wrong types, empty ids, and over-long values are rejected
-as `invalid_request`; a `single`/`multi` question without options is an error. An
-explicit `kind: "input"` ignores `options` — if present they are still validated,
-then dropped. Duplicate option labels are de-duplicated and reported in
-`warnings`. Limits: 1–5 questions, ≤5 options each.
+as `invalid_request`; a `single`/`multi` question or field without options is an
+error. An explicit legacy `kind: "input"` keeps its existing behavior: supplied
+options are validated, then dropped. Duplicate option labels are de-duplicated
+and reported in `warnings`.
+
+Forms are flat. Field names cannot contain dots, brackets, spaces, or path-like
+syntax, and `__proto__`, `constructor`, and `prototype` are rejected. Names must
+be unique. Defaults are checked against the field kind and, for choice fields,
+against the option labels. A top-level form `options` or `default`, a nested
+form/schema, and `options` on a boolean are errors. Limits are `MAX_QUESTIONS=5`,
+`MAX_OPTIONS=5`, and `MAX_FORM_FIELDS=10`.
 
 ```json
 {
+  "header": "Release",
   "questions": [
     {
-      "title": "Which deploy target?",
-      "kind": "single",
-      "options": [
-        { "label": "staging", "description": "Internal smoke test" },
-        { "label": "production", "description": "Customer-facing" }
+      "title": "Proceed with deployment?",
+      "kind": "bool",
+      "default": false
+    },
+    {
+      "title": "Deployment settings",
+      "kind": "simple-form",
+      "fields": [
+        { "name": "confirmed", "label": "Confirm", "kind": "bool", "required": true },
+        {
+          "name": "target",
+          "label": "Target",
+          "kind": "single",
+          "required": true,
+          "options": [
+            { "label": "staging", "description": "Internal smoke test" },
+            { "label": "production", "description": "Customer-facing" }
+          ]
+        },
+        {
+          "name": "checks",
+          "label": "Checks",
+          "kind": "multi",
+          "options": [{ "label": "unit" }, { "label": "integration" }],
+          "default": ["unit"]
+        },
+        { "name": "note", "label": "Release note", "kind": "input" }
       ]
     }
   ]
@@ -297,6 +334,32 @@ The key is shown in the bottom hints and reserved against `overlayToggleKey`
 conflicts. Native input dialogs do not support this shortcut. If an overlay is
 hidden, restore it first with its show/hide key before pressing `Alt+Q`.
 
+## Questionnaire keyboard controls
+
+Legacy `single`/`multi`/`input` questions retain their controls: `Tab` and
+`Shift+Tab` switch question/review tabs, arrows move within choices, `Space`
+selects, and `Enter` confirms. A standalone `bool` shows explicit `✓ True` and
+`✗ False` controls; arrows choose, `Space` sets the value, and `Enter` sets and
+continues. A required boolean without a default begins unset, so the user must
+choose; `false` is an answered value.
+
+A `simple-form` is one question tab with all fields in one scrollable view:
+
+- `Tab` / `Shift+Tab` cycles fields and the Continue/Submit button.
+- `Ctrl+Left` / `Ctrl+Right` switches questionnaire tabs from any question.
+- Boolean fields use arrows plus `Space`/`Enter`; single-choice fields use
+  arrows plus `Space`/`Enter`; multi-choice fields use `Space` to toggle and
+  `Enter` to move on; text fields use `Enter` to move on.
+- `Ctrl+Enter` validates and submits the questionnaire. Required missing/empty
+  fields focus the first invalid field. `PageUp` / `PageDown` scrolls long form
+  or preview content.
+- `Esc`, `Alt+Q`, and overlay show/hide keep their existing behavior.
+
+The active form field's input or selected option is automatically scrolled into view. Rendering is bounded
+by both terminal width and rows, including narrow/short terminals. Focus is
+propagated to Pi's `Input`, so the hardware cursor marker remains available to
+Chinese/Japanese/Korean IMEs.
+
 ## Overlay show/hide key
 
 On the **custom overlay route only** (never inline, never native), the overlay
@@ -336,7 +399,25 @@ interface AskUserResult {
   warnings?: string[];
   error?: { code: AskUserErrorCode; message: string };
 }
+
+interface AskUserAnswer {
+  index: number;
+  id: string;
+  title: string;
+  kind: "single" | "multi" | "input" | "bool" | "simple-form";
+  selections: string[];            // unchanged for legacy kinds
+  freeText?: string;               // unchanged for legacy kinds
+  usedDefault: boolean;
+  value?: boolean | Record<string, boolean | string | string[]>;
+}
 ```
+
+`bool` answers use `value: boolean`, including meaningful `value: false`.
+`simple-form` answers use a flat object keyed by field `name`. Choice values are
+option labels, multi-choice values are label arrays, boolean values stay
+booleans, and entered text is trimmed on both routes. Optional fields left
+unset are omitted. An explicit field default is included and makes `usedDefault` true; required empty
+text/multi fields are still invalid.
 
 `aborted` covers both a user dismissal and a caller abort, distinguished by
 `cancelledReason`. Errors use `empty_answer`, `invalid_request`,
@@ -367,15 +448,20 @@ for a refused explicit config, names the requested route.
   correlation id, route, and status.
 - **The overlay toggle is overlay-only.** Inline and native register no raw
   input listener; hiding never pauses the deadline.
-- **The native route uses single-line `input`**, one question at a time (not
+- **The native route uses single-line `input`**, one logical question at a time (not
   `editor`, which accepts no timeout/signal). The number and an optional note
   share one box: `2`, `2 | note`, or free text; a number list may be
   comma/space/`，`/`、` separated (`1,3`). Out-of-range or malformed numbers
   re-prompt, and an empty box is rejected unless the question has a `default`.
+  A form opens sequential per-field dialogs under the same questionnaire
+  deadline: boolean fields accept `true`/`false`, form choices accept only
+  option numbers and return labels, and optional empty fields are omitted (or
+  use their field default). Cancel/abort/timeout at any field terminates the form.
 - **Tool calls run sequentially** (`executionMode: "sequential"`).
-- **Short terminals degrade in a defined order:** the pinned free-input row and
+- **Short terminals degrade in a defined order:** the pinned legacy free-input row and
   the key hints survive first, down to `MIN_USABLE_ROWS` (3); 0 rows renders
-  nothing. `render(width)` never exceeds the requested width or `terminal.rows`.
+  nothing. Forms reserve a visible row for the focused field and auto-scroll it.
+  `render(width)` never exceeds the requested width or `terminal.rows`.
 
 ## Development
 

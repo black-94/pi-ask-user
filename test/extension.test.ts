@@ -72,8 +72,11 @@ function shutdownSession(handlers: Map<string, Handler[]>, reason = "quit"): voi
 
 interface FakeTool {
 	name: string;
+	description?: string;
+	promptSnippet?: string;
 	executionMode?: string;
 	promptGuidelines?: string[];
+	renderResult?: (result: { content: Array<{ type: string; text: string }>; details: AskUserToolDetails }, options: { isPartial: boolean }, theme: typeof identityTheme) => Component;
 	execute: (
 		id: string,
 		params: unknown,
@@ -150,11 +153,35 @@ test("registers ask_user as a sequential tool and subscribes to the session life
 	const guidelines = definition.promptGuidelines?.join(" ") ?? "";
 	assert.match(guidelines, FALLBACK_ADVICE, "the guidance must direct an ordinary-text question when the UI fails");
 	assert.match(guidelines, /never invent an answer/i, "the guidance must forbid fabricating an answer");
+	assert.match(definition.description ?? "", /boolean.*form/i);
+	assert.match(guidelines, /kind=bool/i);
+	assert.match(guidelines, /simple-form/i);
 	assert.doesNotMatch(
 		guidelines,
 		/(output|emit|print|render) the questionnaire/i,
 		"the model must not be told to output the questionnaire itself",
 	);
+});
+
+test("tool content, details, and result renderer expose typed false and flat form values", async () => {
+	const boolHarness = harness();
+	startSession(boolHarness.handlers, rpcCtx(async () => "false"));
+	const boolResult = await execute(boolHarness.tool, { questions: [{ title: "Proceed?", kind: "bool" }] }, rpcCtx(async () => "false"), "call-bool");
+	assert.equal(boolResult.details.answers[0]!.value, false);
+	assert.match(boolResult.content[0]!.text, /Proceed\?: false/);
+	const rendered = (boolHarness.tool as unknown as FakeTool).renderResult?.(boolResult, { isPartial: false }, identityTheme).render(100).join("\n") ?? "";
+	assert.match(rendered, /Proceed\?: false/);
+
+	const queue = ["false", "2"];
+	const formHarness = harness();
+	const formCtx = rpcCtx(async () => queue.shift());
+	startSession(formHarness.handlers, formCtx);
+	const formResult = await execute(formHarness.tool, { questions: [{ title: "Settings", kind: "simple-form", fields: [
+		{ name: "enabled", label: "Enabled", kind: "bool", required: true },
+		{ name: "target", label: "Target", kind: "single", required: true, options: [{ label: "a" }, { label: "b" }] },
+	] }] }, formCtx, "call-form");
+	assert.deepEqual(formResult.details.answers[0]!.value, { enabled: false, target: "b" });
+	assert.match(formResult.content[0]!.text, /\{"enabled":false,"target":"b"\}/);
 });
 
 test("a tool call before session_start is an explicit not_initialized error", async () => {
