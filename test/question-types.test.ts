@@ -281,9 +281,11 @@ test("custom bool applies an explicit false default without a truthiness bug", (
 
 test("custom mixed form navigates every field, validates, and submits typed values", () => {
 	const { component, result } = mount(request({ questions: [MIXED_FORM] }));
-	component.handleInput(K.right); // bool cursor -> false
+	component.handleInput(K.space); // bool -> true
+	component.handleInput(K.space); // bool -> false
 	component.handleInput(K.enter);
-	component.handleInput(K.down); // single -> prod
+	component.handleInput(K.down); // single focus -> prod
+	component.handleInput(K.space); // select prod
 	component.handleInput(K.enter);
 	component.handleInput(K.space); // multi unit
 	component.handleInput(K.down);
@@ -298,7 +300,7 @@ test("custom mixed form navigates every field, validates, and submits typed valu
 
 test("custom form blocks missing required fields and applies typed defaults", () => {
 	const missing = mount(request({ questions: [{ title: "F", kind: "simple-form", fields: [{ name: "ok", label: "OK", kind: "bool", required: true }] }] }));
-	missing.component.handleInput(K.tab); // button
+	missing.component.handleInput(K.down); // button
 	missing.component.handleInput(K.enter);
 	assert.equal(missing.result(), undefined);
 	assert.match(missing.component.render(70).join("\n"), /required field.*ok/i);
@@ -313,15 +315,21 @@ test("custom form blocks missing required fields and applies typed defaults", ()
 	assert.deepEqual(defaults.result()?.answers?.[0]?.value, { ok: false, target: "b" });
 });
 
-test("custom form Tab cycles fields/button while Ctrl arrows retain question-tab access", () => {
+test("custom form Tab switches questions while arrows move field focus", () => {
 	const { component } = mount(request({ questions: [MIXED_FORM, { title: "After", kind: "input" }] }));
-	component.handleInput(K.tab);
-	assert.match(component.render(80).join("\n"), /▸ Target/);
-	component.handleInput("\x1b[1;5C");
-	assert.match(component.render(80).join("\n"), /2\/2\. After/);
-	component.handleInput("\x1b[1;5D");
-	assert.match(component.render(80).join("\n"), /1\/2\. Release settings/);
-	component.dispose();
+	try {
+		component.handleInput(K.right);
+		assert.match(component.render(80).join("\n"), /▸ Target/);
+		component.handleInput(K.tab);
+		assert.match(component.render(80).join("\n"), /2\/2\. After/);
+		component.handleInput(K.shiftTab);
+		assert.match(component.render(80).join("\n"), /1\/2\. Release settings/);
+		assert.match(component.render(80).join("\n"), /▸ Target/);
+		component.handleInput("\x1b[1;5C");
+		assert.match(component.render(80).join("\n"), /2\/2\. After/);
+		component.handleInput("\x1b[1;5D");
+		assert.match(component.render(80).join("\n"), /1\/2\. Release settings/);
+	} finally { component.dispose(); }
 });
 
 test("custom form advances through questionnaire review and preserves typed values", () => {
@@ -329,7 +337,8 @@ test("custom form advances through questionnaire review and preserves typed valu
 		{ title: "Form", kind: "simple-form", fields: [{ name: "ok", label: "OK", kind: "bool", required: true }] },
 		{ title: "Note", kind: "input" },
 	] }));
-	component.handleInput(K.down); // false
+	component.handleInput(K.space); // true
+	component.handleInput(K.space); // false
 	component.handleInput(K.enter); // button
 	component.handleInput(K.enter); // continue to question 2
 	component.handleInput("ready");
@@ -353,7 +362,7 @@ test("custom form keeps focused fields visible and IME cursor positioned in narr
 		assert.ok(lines.length <= 8);
 		assert.match(lines.join("\n"), new RegExp(`Field ${index}`));
 		assert.ok(lines.join("\n").includes(CURSOR_MARKER), `field ${index} should retain the IME cursor marker`);
-		if (index < fields.length - 1) component.handleInput(K.tab);
+		if (index < fields.length - 1) component.handleInput(K.down);
 	}
 	component.dispose();
 });
@@ -413,6 +422,9 @@ test("typed controls and form text stay visible even in one-to-five-row terminal
 		try {
 			assert.match(bool.component.render(40).join("\n"), /True/);
 			bool.component.handleInput(K.down);
+			assert.match(bool.component.render(40).join("\n"), /True \(unset\)/);
+			bool.component.handleInput(K.space);
+			bool.component.handleInput(K.space);
 			assert.match(bool.component.render(40).join("\n"), /False/);
 		} finally { bool.component.dispose(); }
 		const form = mount(request({ questions: [{ title: "F", kind: "simple-form", fields: [
@@ -431,8 +443,8 @@ test("custom Ctrl+Enter focuses the first invalid form field, not the button", (
 		{ name: "ok", label: "OK", kind: "bool" },
 	] }] }));
 	try {
-		component.handleInput(K.tab);
-		component.handleInput(K.tab);
+		component.handleInput(K.down);
+		component.handleInput(K.down);
 		component.handleInput(K.ctrlEnter);
 		assert.equal(result(), undefined);
 		assert.match(component.render(80).join("\n"), /▸ Note/);
@@ -467,7 +479,7 @@ test("custom and native form text have the same trimming and omission rules", as
 	const custom = mount(req);
 	try {
 		custom.component.handleInput("  hello  ");
-		custom.component.handleInput(K.tab);
+		custom.component.handleInput(K.down);
 		custom.component.handleInput("   ");
 		custom.component.handleInput(K.ctrlEnter);
 		const queue = ["  hello  ", "   "];
@@ -498,7 +510,7 @@ test("form paging is relative to the visible window and editing restores the act
 	const { component, result } = mount(request({ questions: [{ title: "F", kind: "simple-form", fields }] }), 8);
 	try {
 		component.focused = true;
-		for (let index = 0; index < 9; index += 1) component.handleInput(K.tab);
+		for (let index = 0; index < 9; index += 1) component.handleInput(K.down);
 		assert.match(component.render(40).join("\n"), /Field 9/);
 		for (let index = 0; index < 20; index += 1) {
 			component.handleInput("\x1b[5~");

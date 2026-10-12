@@ -119,6 +119,13 @@ function printableText(data: string): string | undefined {
 	return data;
 }
 
+/** Direction keys only move focus; they never edit a control's value. */
+function focusDirection(data: string): -1 | 1 | undefined {
+	if (matchesKey(data, Key.up) || matchesKey(data, Key.left) || matchesKey(data, "ctrl+p")) return -1;
+	if (matchesKey(data, Key.down) || matchesKey(data, Key.right) || matchesKey(data, "ctrl+n")) return 1;
+	return undefined;
+}
+
 interface FormUIState {
 	values: AskUserFormValue;
 	present: Set<string>;
@@ -477,11 +484,34 @@ export class AskUserComponent implements Component, Focusable {
 		const question = this.currentQuestion();
 		if (!form) return;
 		this.syncFormDraft(this.tab);
-		const slots = (question.fields?.length ?? 0) + 1;
-		form.active = (form.active + delta + slots) % slots;
+		const fields = question.fields ?? [];
+		const next = clamp(form.active + delta, 0, fields.length);
+		if (next !== form.active) {
+			form.active = next;
+			const field = fields[next];
+			if (field && (field.kind === "single" || field.kind === "multi")) {
+				form.optionCursors[next] = delta < 0 ? field.options.length - 1 : 0;
+			}
+		}
 		this.notice = undefined;
 		this.resetScroll();
 		this.refresh();
+	}
+
+	/** Traverse choice rows, then adjacent fields and the action button. */
+	private moveFormRow(delta: -1 | 1): void {
+		const form = this.forms[this.tab]!;
+		const field = this.currentQuestion().fields?.[form.active];
+		if (field && (field.kind === "single" || field.kind === "multi")) {
+			const cursor = (form.optionCursors[form.active] ?? 0) + delta;
+			if (cursor >= 0 && cursor < field.options.length) {
+				form.optionCursors[form.active] = cursor;
+				this.resetScroll();
+				this.refresh();
+				return;
+			}
+		}
+		this.moveFormFocus(delta);
 	}
 
 	private setFormValue(field: NormalizedFormField, value: boolean | string | string[], fieldIndex: number): void {
@@ -530,7 +560,7 @@ export class AskUserComponent implements Component, Focusable {
 		const fieldIndex = form.active;
 		const field = fields[fieldIndex]!;
 		this.resetScroll();
-		let cursor = form.optionCursors[fieldIndex] ?? 0;
+		const cursor = form.optionCursors[fieldIndex] ?? 0;
 		if (field.kind === "input") {
 			if (matchesKey(data, Key.enter)) {
 				this.syncFormInput(this.tab, fieldIndex);
@@ -547,18 +577,17 @@ export class AskUserComponent implements Component, Focusable {
 		}
 		if (field.kind === "bool") {
 			const current = form.present.has(field.name) ? form.values[field.name] : undefined;
-			const next = this.boolValueForKey(data, typeof current === "boolean" ? current : undefined);
-			if (next === undefined) return;
-			// Confirming an existing default preserves its provenance.
-			if (!matchesKey(data, Key.enter) || current === undefined) this.setFormValue(field, next, fieldIndex);
+			if (matchesKey(data, Key.enter)) {
+				this.advanceFormField();
+				return;
+			}
+			if (!matchesKey(data, Key.space)) return;
+			this.setFormValue(field, typeof current === "boolean" ? !current : true, fieldIndex);
 			this.syncFormDraft(this.tab);
-			if (matchesKey(data, Key.enter)) this.advanceFormField();
-			else this.refresh();
+			this.refresh();
 			return;
 		}
-		if (matchesKey(data, Key.up) || matchesKey(data, Key.left)) cursor = clamp(cursor - 1, 0, field.options.length - 1);
-		else if (matchesKey(data, Key.down) || matchesKey(data, Key.right)) cursor = clamp(cursor + 1, 0, field.options.length - 1);
-		else if (matchesKey(data, Key.space)) {
+		if (matchesKey(data, Key.space)) {
 			if (field.kind === "single") this.setFormValue(field, field.options[cursor]!.label, fieldIndex);
 			else {
 				const current = Array.isArray(form.values[field.name]) ? [...form.values[field.name] as string[]] : [];
@@ -567,7 +596,6 @@ export class AskUserComponent implements Component, Focusable {
 				this.setFormValue(field, field.options.filter((option) => next.includes(option.label)).map((option) => option.label), fieldIndex);
 			}
 		} else if (matchesKey(data, Key.enter)) {
-			if (field.kind === "single") this.setFormValue(field, field.options[cursor]!.label, fieldIndex);
 			this.advanceFormField();
 			return;
 		} else return;
@@ -575,15 +603,6 @@ export class AskUserComponent implements Component, Focusable {
 		this.syncFormDraft(this.tab);
 		this.resetScroll();
 		this.refresh();
-	}
-
-	/** One boolean control: arrows set, Space toggles, Enter confirms (unset -> true). */
-	private boolValueForKey(data: string, current: boolean | undefined): boolean | undefined {
-		if (matchesKey(data, Key.up) || matchesKey(data, Key.left) || matchesKey(data, "ctrl+p")) return true;
-		if (matchesKey(data, Key.down) || matchesKey(data, Key.right) || matchesKey(data, "ctrl+n")) return false;
-		if (matchesKey(data, Key.space)) return current === undefined ? true : !current;
-		if (matchesKey(data, Key.enter)) return current ?? true;
-		return undefined;
 	}
 
 	// -- key handling --------------------------------------------------------
@@ -615,19 +634,6 @@ export class AskUserComponent implements Component, Focusable {
 			this.moveTab(1);
 			return;
 		}
-		if (!this.isReview && this.currentQuestion().kind === "simple-form") {
-			if (matchesKey(data, "shift+tab")) {
-				this.moveFormFocus(-1);
-				return;
-			}
-			if (matchesKey(data, Key.tab)) {
-				this.moveFormFocus(1);
-				return;
-			}
-			if (this.isScrollKey(data)) return;
-			this.handleFormInput(data);
-			return;
-		}
 		if (matchesKey(data, "shift+tab")) {
 			this.moveTab(-1);
 			return;
@@ -637,12 +643,18 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 		if (this.isScrollKey(data)) return;
+		const direction = focusDirection(data);
+		if (!this.isReview && this.currentQuestion().kind === "simple-form") {
+			if (direction !== undefined) this.moveFormRow(direction);
+			else this.handleFormInput(data);
+			return;
+		}
 
 		if (this.isReview) {
-			if (matchesKey(data, Key.down) || matchesKey(data, "ctrl+n")) {
+			if (direction === 1) {
 				this.reviewButtonFocused = true;
 				this.refresh();
-			} else if (matchesKey(data, Key.up) || matchesKey(data, "ctrl+p")) {
+			} else if (direction === -1) {
 				this.reviewButtonFocused = false;
 				this.refresh();
 			} else if (matchesKey(data, Key.enter) || (this.reviewButtonFocused && matchesKey(data, Key.space))) {
@@ -657,27 +669,28 @@ export class AskUserComponent implements Component, Focusable {
 				this.skipWithDefault();
 				return;
 			}
-			const draft = this.drafts[this.tab]!;
-			const next = this.boolValueForKey(data, draft.valueSet && typeof draft.value === "boolean" ? draft.value : undefined);
-			if (next === undefined) return;
-			if (!matchesKey(data, Key.enter) || !draft.valueSet) {
-				this.drafts[this.tab] = { selections: [], freeText: "", usedDefault: false, value: next, valueSet: true };
+			if (matchesKey(data, Key.enter)) {
+				this.commitAndAdvance();
+				return;
 			}
+			if (!matchesKey(data, Key.space)) return;
+			const draft = this.drafts[this.tab]!;
+			const next = draft.valueSet && typeof draft.value === "boolean" ? !draft.value : true;
+			this.drafts[this.tab] = { selections: [], freeText: "", usedDefault: false, value: next, valueSet: true };
 			this.notice = undefined;
-			if (matchesKey(data, Key.enter)) this.advance();
-			else this.refresh();
+			this.refresh();
 			return;
 		}
 		if (question.kind === "input") {
 			this.cursors[this.tab] = question.options.length;
 		}
 
+		if (direction !== undefined) {
+			this.moveRow(direction);
+			return;
+		}
+
 		if (this.isInputRow()) {
-			// Up returns to the options instead of being swallowed by the input.
-			if (question.options.length > 0 && (matchesKey(data, Key.up) || matchesKey(data, "ctrl+p"))) {
-				this.moveRow(-1);
-				return;
-			}
 			if (matchesKey(data, "shift+enter")) {
 				this.forwardToInput(data);
 				this.refresh();
@@ -692,14 +705,6 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 
-		if (matchesKey(data, Key.up) || matchesKey(data, "ctrl+p")) {
-			this.moveRow(-1);
-			return;
-		}
-		if (matchesKey(data, Key.down) || matchesKey(data, "ctrl+n")) {
-			this.moveRow(1);
-			return;
-		}
 		if (matchesKey(data, Key.space)) {
 			if (question.kind === "multi") {
 				this.toggleRow();
@@ -714,7 +719,7 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, Key.enter)) {
-			this.onOptionEnter();
+			this.commitAndAdvance();
 			return;
 		}
 		if (matchesKey(data, "s")) {
@@ -728,26 +733,6 @@ export class AskUserComponent implements Component, Focusable {
 			this.forwardToInput(data);
 			this.refresh();
 		}
-	}
-
-	private onOptionEnter(): void {
-		const question = this.currentQuestion();
-		if (question.kind === "multi") {
-			if (this.hasInputBar(question)) this.toggleRow();
-			else this.commitAndAdvance();
-			return;
-		}
-		// Sync any typed note before advancing, so selecting an option never drops
-		// free text that was entered from the pinned input row.
-		this.syncDraftFromInput(this.tab);
-		// Single-select: Enter picks and advances. A note can be added first by
-		// moving down to the free-input row.
-		const row = this.rowIndex();
-		this.drafts[this.tab]!.selections = [row];
-		this.drafts[this.tab]!.usedDefault = false;
-		this.notice = undefined;
-		this.resetScroll();
-		this.advance();
 	}
 
 	private toggleRow(): void {
@@ -785,9 +770,11 @@ export class AskUserComponent implements Component, Focusable {
 		this.syncDraftFromInput(this.tab);
 		const draft = this.drafts[this.tab]!;
 		if (draftIsEmpty(draft) && !question.hasDefault) {
-			this.notice = this.hasInputBar(question)
-				? "This question is required: select an option or type text."
-				: "This question is required: select an option.";
+			this.notice = question.kind === "bool"
+				? "This question is required: press Space to set a boolean value."
+				: this.hasInputBar(question)
+					? "This question is required: select an option or type text."
+					: "This question is required: select an option.";
 			this.refresh();
 			return;
 		}
@@ -1178,28 +1165,28 @@ export class AskUserComponent implements Component, Focusable {
 			return this.theme.fg("dim", context ? `${context} · ${controlText}` : controlText);
 		};
 		if (this.isReview) {
-			const reviewHints = ["↓ focus submit", "Enter submit", "Tab switch question"];
+			const reviewHints = ["Tab switch question", "Arrows focus", "Enter submit"];
 			return withControls(reviewHints);
 		}
 		const question = this.currentQuestion();
 		if (question.kind === "simple-form") {
-			const hints = ["Tab next field", "Shift+Tab previous", "Ctrl+←/→ question"];
+			const hints = ["Tab switch question", "Arrows focus"];
 			const form = this.forms[this.tab]!;
 			const field = question.fields?.[form.active];
-			if (field?.kind === "multi") hints.push("Space toggle", "Enter next");
-			else if (field?.kind === "bool") hints.push("Space toggle", "←/→ set", "Enter next");
+			if (field?.kind === "multi" || field?.kind === "bool") hints.push("Space toggle", "Enter next");
+			else if (field?.kind === "single") hints.push("Space select", "Enter next");
 			else if (field) hints.push("Enter next");
 			else hints.push("Enter continue");
 			if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn scroll");
 			return withControls(hints);
 		}
 		if (question.kind === "bool") {
-			const hints = ["Space toggle", "↑/↓ set", "Enter confirm", "Tab switch"];
+			const hints = ["Tab switch", "Space toggle", "Enter confirm"];
 			if (question.hasDefault) hints.push("s use default");
 			return withControls(hints);
 		}
-		const hints = ["Tab switch", "↑/↓ move", `Enter ${this.isInputRow() || (question.kind === "multi" && !this.hasInputBar(question)) ? "confirm" : "select"}`];
-		if (question.kind === "multi") hints.push("Space multi-select");
+		const hints = ["Tab switch", "Arrows focus", "Enter confirm"];
+		if (!this.isInputRow()) hints.push(question.kind === "multi" ? "Space toggle" : "Space select");
 		if (question.hasDefault) hints.push("s use default");
 		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn preview");
 		if (this.isInputRow() && question.options.length > 0) hints.push("↑ back to options");

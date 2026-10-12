@@ -121,7 +121,10 @@ function tuiWithCustom(onRender?: (rendered: string) => void, key = "\r"): Exten
 						(result: unknown) => resolve(result),
 					);
 					onRender?.(component.render(100).join("\n"));
-					queueMicrotask(() => component.handleInput?.(key));
+					queueMicrotask(() => {
+						if (key === "\r") component.handleInput?.(" ");
+						component.handleInput?.(key);
+					});
 				}),
 		},
 	} as unknown as ExtensionContext;

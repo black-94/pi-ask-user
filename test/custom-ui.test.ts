@@ -128,12 +128,13 @@ test("no preview is shown when the focused option has none", () => {
 	assert.ok(!lines.join("\n").includes("never"));
 });
 
-test("single-select: Enter selects and submits", () => {
+test("single-select: Space selects and Enter submits", () => {
 	const req = request({
 		questions: [{ title: "Deploy", kind: "single", options: [{ label: "staging" }, { label: "prod" }] }],
 	});
 	const { component, getResult } = mount(req);
 	component.handleInput(KEYS.down);
+	component.handleInput(KEYS.space);
 	component.handleInput(KEYS.enter);
 	const result = getResult();
 	assert.ok(result);
@@ -300,8 +301,10 @@ test("multiple questions: tabs reach a review tab before submitting", () => {
 	});
 	const { component, getResult } = mount(req);
 	assert.match(component.render(100).join("\n"), /Submit/);
-	component.handleInput(KEYS.enter); // answer first -> advances to second tab
-	component.handleInput(KEYS.enter); // answer second -> advances to review tab
+	component.handleInput(KEYS.space); // select first
+	component.handleInput(KEYS.enter); // advances to second tab
+	component.handleInput(KEYS.space); // select second
+	component.handleInput(KEYS.enter); // advances to review tab
 	assert.equal(getResult(), undefined);
 	const review = component.render(100).join("\n");
 	assert.match(review, /Review before submitting/);
@@ -446,7 +449,8 @@ test("Up from the free-input row returns to the options", () => {
 	component.handleInput(KEYS.down); // free-input row
 	component.handleInput("a note"); // typed into the input
 	component.handleInput(KEYS.up); // back to option index 1
-	component.handleInput(KEYS.enter); // select the focused option and submit
+	component.handleInput(KEYS.space); // select the focused option
+	component.handleInput(KEYS.enter); // submit
 	const result = getResult();
 	assert.ok(result);
 	assert.equal(result!.kind, "submitted");
@@ -607,7 +611,8 @@ test("(a) single-select: text typed first survives selecting an option and submi
 	component.handleInput("note from input"); // jumps to the input row
 	component.handleInput(KEYS.up); // back to the options
 	component.handleInput(KEYS.up); // onto the first option
-	component.handleInput(KEYS.enter); // select + submit
+	component.handleInput(KEYS.space); // select
+	component.handleInput(KEYS.enter); // submit
 	const result = getResult();
 	assert.ok(result);
 	assert.equal(result!.kind, "submitted");
@@ -642,7 +647,8 @@ test("(c) switching tabs then submitting from the review tab keeps each answer",
 	const { component, getResult } = mount(req);
 	component.handleInput("free text on q1"); // input row on q1
 	component.handleInput(KEYS.tab); // switch to q2 (must not lose q1 text)
-	component.handleInput(KEYS.enter); // select 'c' -> advances to the review tab
+	component.handleInput(KEYS.space); // select 'c'
+	component.handleInput(KEYS.enter); // advances to the review tab
 	const review = component.render(100).join("\n");
 	assert.match(review, /free text on q1/, "the review tab must show the preserved draft");
 	component.handleInput(KEYS.enter); // submit from review

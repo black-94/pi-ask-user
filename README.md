@@ -368,24 +368,33 @@ hidden, restore it first with its show/hide key before pressing `Alt+Q`.
 
 ## Questionnaire keyboard controls
 
-Legacy `single`/`multi`/`input` questions retain their controls: `Tab` and
-`Shift+Tab` switch question/review tabs, arrows move within choices, `Space`
-selects, and `Enter` confirms. With `allowFreeText: false`, multi-choice uses `Space` to
-toggle selections and `Enter` to continue (there is no extra text row).
+In the custom terminal UI, all question kinds share the same controls:
+
+- `Tab` / `Shift+Tab` switches question/review tabs, including from forms.
+- Up/left moves focus backward; down/right moves it forward. Arrows never
+  change values or selections. A standalone boolean has only one focus target,
+  so arrows leave it unchanged.
+- `Space` toggles booleans/multiple-choice selections or selects the focused
+  single-choice option. In a text input, Space inserts a space.
+- `Enter` confirms/continues without selecting or toggling the focused control.
+  Required unanswered questions block confirmation; defaults can still be used.
+
 A standalone `bool` shows **one** control: `[✓] True` or `[✗] False`.
-`Space` toggles, up/left sets true, down/right sets false, and `Enter` confirms
-and continues. An unset boolean shows `[ ] True (unset)`; Enter explicitly
-accepts true. Defaults are displayed immediately, and confirming a false
-default keeps it false. `false` is an answered value, never an empty answer.
+An unset boolean shows `[ ] True (unset)` and remains unset until Space is
+pressed (or a default is used). Defaults are displayed immediately, and
+confirming a false default keeps it false. `false` is an answered value,
+never an empty answer.
 
 A `simple-form` is one question tab with all fields in one scrollable view:
 
-- `Tab` / `Shift+Tab` cycles fields and the Continue/Submit button.
-- `Ctrl+Left` / `Ctrl+Right` switches questionnaire tabs from any question.
-- Boolean fields use the same single toggle control (`Space` toggles, arrows set,
-  `Enter` confirms and moves on); single-choice fields use
-  arrows plus `Space`/`Enter`; multi-choice fields use `Space` to toggle and
-  `Enter` to move on; text fields use `Enter` to move on.
+- Arrows move through fields, choice options, and the Continue/Submit button.
+  Moving beyond a field's first/last option focuses the adjacent field/button.
+  Focus stops at the beginning/end of the form.
+- `Tab` / `Shift+Tab` switches question/review tabs, preserving field focus and values.
+  `Ctrl+Left` / `Ctrl+Right` remains an alternate question-tab shortcut.
+- `Space` toggles boolean/multi fields and selects single-choice options.
+  `Enter` moves to the next field without changing the current value; text fields
+  also use `Enter` to move on. Optional unset fields remain omitted.
 - `Ctrl+Enter` validates and submits the questionnaire. Required missing/empty
   fields focus the first invalid field. `PageUp` / `PageDown` scrolls long form
   or preview content.
@@ -394,7 +403,10 @@ A `simple-form` is one question tab with all fields in one scrollable view:
 The active form field's input or selected option is automatically scrolled into view. Rendering is bounded
 by both terminal width and rows, including narrow/short terminals. Focus is
 propagated to Pi's `Input`, so the hardware cursor marker remains available to
-Chinese/Japanese/Korean IMEs.
+Chinese/Japanese/Korean IMEs. Plain arrows are reserved for control focus even
+inside text fields; use `Ctrl+B` / `Ctrl+F` or `Home` / `End` to move the text cursor.
+Native dialogs are host-owned and use the host's keyboard controls; this custom
+terminal key mapping does not override native TUI/RPC/ACP dialogs.
 
 ## Overlay show/hide key
 

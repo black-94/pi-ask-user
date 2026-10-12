@@ -257,7 +257,10 @@ function answeringCtx(): ExtensionContext {
 						{},
 						(result: unknown) => resolve(result),
 					);
-					queueMicrotask(() => component.handleInput?.("\r"));
+					queueMicrotask(() => {
+						component.handleInput?.(" ");
+						component.handleInput?.("\r");
+					});
 				}),
 		},
 	} as unknown as ExtensionContext;
