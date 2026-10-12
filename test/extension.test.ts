@@ -106,7 +106,7 @@ function rpcCtx(input: (prompt: string) => Promise<string | undefined>): Extensi
 }
 
 /** A TUI context that exposes both a callable input dialog and a custom renderer. */
-function tuiWithCustom(onRender?: (rendered: string) => void, key = "\r"): ExtensionContext {
+function tuiWithCustom(onRender?: (rendered: string) => void, key = "\x1b[13;5u"): ExtensionContext {
 	return {
 		mode: "tui",
 		hasUI: true,
@@ -122,7 +122,7 @@ function tuiWithCustom(onRender?: (rendered: string) => void, key = "\r"): Exten
 					);
 					onRender?.(component.render(100).join("\n"));
 					queueMicrotask(() => {
-						if (key === "\r") component.handleInput?.(" ");
+						if (key === "\x1b[13;5u") component.handleInput?.("\r");
 						component.handleInput?.(key);
 					});
 				}),

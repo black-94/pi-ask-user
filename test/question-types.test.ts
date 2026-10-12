@@ -266,7 +266,7 @@ test("custom bool uses one toggle control and submits false", () => {
 		const crossed = component.render(60).join("\n");
 		assert.match(crossed, /\[✗\] False/);
 		assert.doesNotMatch(crossed, /True/);
-		component.handleInput(K.enter);
+		component.handleInput(K.ctrlEnter);
 		assert.equal(result()?.kind, "submitted");
 		assert.equal(result()?.answers?.[0]?.value, false);
 	} finally { component.dispose(); }
@@ -283,14 +283,14 @@ test("custom mixed form navigates every field, validates, and submits typed valu
 	const { component, result } = mount(request({ questions: [MIXED_FORM] }));
 	component.handleInput(K.space); // bool -> true
 	component.handleInput(K.space); // bool -> false
-	component.handleInput(K.enter);
+	component.handleInput(K.down); // next field
 	component.handleInput(K.down); // single focus -> prod
 	component.handleInput(K.space); // select prod
-	component.handleInput(K.enter);
+	component.handleInput(K.down); // next field
 	component.handleInput(K.space); // multi unit
 	component.handleInput(K.down);
 	component.handleInput(K.space); // multi integration
-	component.handleInput(K.enter);
+	component.handleInput(K.down); // next field
 	component.handleInput("ship it");
 	component.handleInput(K.enter); // button
 	component.handleInput(K.enter); // submit
@@ -339,7 +339,7 @@ test("custom form advances through questionnaire review and preserves typed valu
 	] }));
 	component.handleInput(K.space); // true
 	component.handleInput(K.space); // false
-	component.handleInput(K.enter); // button
+	component.handleInput(K.down); // button
 	component.handleInput(K.enter); // continue to question 2
 	component.handleInput("ready");
 	component.handleInput(K.enter); // review

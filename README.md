@@ -376,14 +376,18 @@ In the custom terminal UI, all question kinds share the same controls:
   so arrows leave it unchanged.
 - `Space` toggles booleans/multiple-choice selections or selects the focused
   single-choice option. In a text input, Space inserts a space.
-- `Enter` confirms/continues without selecting or toggling the focused control.
-  Required unanswered questions block confirmation; defaults can still be used.
+- `Enter` selects the focused single-choice option or toggles the focused
+  multiple-choice/boolean control, keeping focus in place. In text inputs and
+  on Continue/Submit buttons, it confirms/continues instead.
+- `Ctrl+Enter` validates and submits the whole questionnaire without changing
+  the focused control. Required unanswered questions block submission; defaults
+  can still be used.
 
 A standalone `bool` shows **one** control: `[✓] True` or `[✗] False`.
-An unset boolean shows `[ ] True (unset)` and remains unset until Space is
-pressed (or a default is used). Defaults are displayed immediately, and
-confirming a false default keeps it false. `false` is an answered value,
-never an empty answer.
+An unset boolean shows `[ ] True (unset)` and becomes true when Enter or Space
+is pressed. Defaults are displayed immediately; Enter or
+Space toggles them, while Ctrl+Enter submits them unchanged. `false` is an
+answered value, never an empty answer.
 
 A `simple-form` is one question tab with all fields in one scrollable view:
 
@@ -392,9 +396,9 @@ A `simple-form` is one question tab with all fields in one scrollable view:
   Focus stops at the beginning/end of the form.
 - `Tab` / `Shift+Tab` switches question/review tabs, preserving field focus and values.
   `Ctrl+Left` / `Ctrl+Right` remains an alternate question-tab shortcut.
-- `Space` toggles boolean/multi fields and selects single-choice options.
-  `Enter` moves to the next field without changing the current value; text fields
-  also use `Enter` to move on. Optional unset fields remain omitted.
+- `Enter` or `Space` toggles boolean/multi fields and selects single-choice
+  options without moving focus. Use arrows to reach the next field or button;
+  text fields still use `Enter` to move on. Optional unset fields remain omitted.
 - `Ctrl+Enter` validates and submits the questionnaire. Required missing/empty
   fields focus the first invalid field. `PageUp` / `PageDown` scrolls long form
   or preview content.

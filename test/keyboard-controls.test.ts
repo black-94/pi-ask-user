@@ -32,39 +32,46 @@ for (const displayMode of ["overlay", "inline"]) {
 					ui.component.handleInput(key);
 					assert.equal(ui.text(), before);
 				}
+				assert.match(before, /Enter\/Space toggle/);
 				ui.component.handleInput(K.enter);
-				if (initial === undefined) {
-					assert.equal(ui.result(), undefined, "Enter must not implicitly set true");
-					assert.match(ui.text(), /True \(unset\)/);
-					ui.component.handleInput(K.space);
-					ui.component.handleInput(K.enter);
-					assert.equal(ui.result()?.answers?.[0]?.value, true);
-					assert.equal(ui.result()?.answers?.[0]?.usedDefault, false);
-				} else {
-					assert.equal(ui.result()?.answers?.[0]?.value, initial);
-					assert.equal(ui.result()?.answers?.[0]?.usedDefault, true);
-				}
+				assert.equal(ui.result(), undefined, "Enter toggles without submitting");
+				const next = initial === undefined ? true : !initial;
+				assert.match(ui.text(), next ? /\[✓\] True/ : /\[✗\] False/);
+				assert.doesNotMatch(ui.text(), /\(default\)|\(unset\)/);
+				ui.component.handleInput(K.enter);
+				assert.equal(ui.result(), undefined);
+				assert.match(ui.text(), !next ? /\[✓\] True/ : /\[✗\] False/);
+				ui.component.handleInput(K.ctrlEnter);
+				assert.equal(ui.result()?.answers?.[0]?.value, !next);
+				assert.equal(ui.result()?.answers?.[0]?.usedDefault, false);
 			} finally { ui.component.dispose(); }
 		});
 	}
 
 	for (const kind of ["single", "multi"]) {
 		for (const allowFreeText of [false, true]) {
-			test(`${displayMode}: ${kind}, free text ${allowFreeText}: arrows focus, Space selects, Enter only confirms`, () => {
+			test(`${displayMode}: ${kind}, free text ${allowFreeText}: Enter edits the focused option without submitting`, () => {
 				const ui = mount({ displayMode, allowFreeText, questions: [{ title: "Choice", kind, options: choices }] });
 				try {
 					ui.component.handleInput(K.right);
 					assert.match(ui.text(), /▸ [○▢] 2\. B/);
 					ui.component.handleInput(K.enter);
 					assert.equal(ui.result(), undefined);
-					assert.doesNotMatch(ui.text(), /◉|▣/);
+					assert.match(ui.text(), /▸ [◉▣] 2\. B/);
+					assert.match(ui.text(), kind === "multi" ? /Enter\/Space toggle/ : /Enter\/Space select/);
 					ui.component.handleInput(K.space);
+					ui.component.handleInput(K.enter); // single stays selected; multi is selected again
 					ui.component.handleInput(K.left);
 					assert.match(ui.text(), /▸ [○▢] 1\. A/);
 					assert.match(ui.text(), /[◉▣] 2\. B/);
-					ui.component.handleInput(K.enter); // A is focused but B must remain the sole selection
+					ui.component.handleInput(K.enter);
+					assert.equal(ui.result(), undefined);
+					assert.match(ui.text(), /▸ [◉▣] 1\. A/);
+					ui.component.handleInput(K.enter); // single is idempotent; multi deselects A
+					assert.equal(ui.result(), undefined);
+					ui.component.handleInput(K.ctrlEnter);
 					assert.equal(ui.result()?.kind, "submitted");
-					assert.deepEqual(ui.result()?.answers?.[0]?.selections, ["B"]);
+					assert.deepEqual(ui.result()?.answers?.[0]?.selections, kind === "single" ? ["A"] : ["B"]);
 				} finally { ui.component.dispose(); }
 			});
 		}
@@ -119,42 +126,65 @@ for (const displayMode of ["overlay", "inline"]) {
 	}
 }
 
-test("form Enter never implicitly sets optional bool/single or overwrites a choice default", () => {
-	const ui = mount({ questions: [{ title: "Form", kind: "simple-form", fields: [
-		{ name: "bool", label: "Bool", kind: "bool" },
-		{ name: "single", label: "Single", kind: "single", options: choices },
-		{ name: "default", label: "Default", kind: "single", options: choices, default: "B" },
-		{ name: "multi", label: "Multi", kind: "multi", options: choices, default: ["A"] },
-	] }] });
-	try {
-		ui.component.handleInput(K.enter);
-		ui.component.handleInput(K.enter);
-		ui.component.handleInput(K.left); // focus A in defaulted single field
-		ui.component.handleInput(K.enter);
-		ui.component.handleInput(K.enter);
-		ui.component.handleInput(K.enter);
-		assert.deepEqual(ui.result()?.answers?.[0]?.value, { default: "B", multi: ["A"] });
-		assert.equal(ui.result()?.answers?.[0]?.usedDefault, true);
-	} finally { ui.component.dispose(); }
-});
-
-test("required form bool/single remain unset after Enter and block submission", () => {
-	for (const kind of ["bool", "single"]) {
-		const ui = mount({ questions: [{ title: "Form", kind: "simple-form", fields: [
-			{ name: "required", label: "Required", kind, required: true, ...(kind === "single" ? { options: choices } : {}) },
+for (const displayMode of ["overlay", "inline"]) {
+	test(`${displayMode}: form Enter edits bool/single/multi defaults and keeps focus`, () => {
+		const ui = mount({ displayMode, questions: [{ title: "Form", kind: "simple-form", fields: [
+			{ name: "bool", label: "Bool", kind: "bool", default: false },
+			{ name: "single", label: "Single", kind: "single", options: choices, default: "B" },
+			{ name: "multi", label: "Multi", kind: "multi", options: choices, default: ["A"] },
+			{ name: "untouched", label: "Untouched", kind: "bool" },
 		] }] });
 		try {
 			ui.component.handleInput(K.enter);
+			assert.match(ui.text(), /▸ Bool/);
+			assert.match(ui.text(), /\[✓\] True/);
+			assert.match(ui.text(), /Enter\/Space toggle/);
 			ui.component.handleInput(K.enter);
+			assert.match(ui.text(), /\[✗\] False/);
+			ui.component.handleInput(K.down); // Single A
+			ui.component.handleInput(K.enter);
+			assert.match(ui.text(), /▸ ◉ A/);
+			assert.match(ui.text(), /Enter\/Space select/);
+			ui.component.handleInput(K.enter); // single does not deselect
+			assert.match(ui.text(), /▸ ◉ A/);
+			ui.component.handleInput(K.down); // Single B
+			ui.component.handleInput(K.down); // Multi A
+			ui.component.handleInput(K.enter); // deselect default A
+			assert.match(ui.text(), /▸ ▢ A/);
+			ui.component.handleInput(K.down); // Multi B
+			ui.component.handleInput(K.enter);
+			assert.match(ui.text(), /▸ ▣ B/);
+			ui.component.handleInput(K.enter);
+			assert.match(ui.text(), /▸ ▢ B/);
 			assert.equal(ui.result(), undefined);
-			assert.match(ui.text(), /required field/);
-			assert.match(ui.text(), /▸ Required/);
-			ui.component.handleInput(K.space);
 			ui.component.handleInput(K.ctrlEnter);
-			assert.deepEqual(ui.result()?.answers?.[0]?.value, { required: kind === "bool" ? true : "A" });
+			assert.deepEqual(ui.result()?.answers?.[0]?.value, { bool: false, single: "A", multi: [] });
+			assert.equal(ui.result()?.answers?.[0]?.usedDefault, false);
 		} finally { ui.component.dispose(); }
+	});
+
+	for (const kind of ["bool", "single", "multi"]) {
+		test(`${displayMode}: Enter answers an unset required form ${kind}, then the button submits`, () => {
+			const ui = mount({ displayMode, questions: [{ title: "Form", kind: "simple-form", fields: [
+				{ name: "required", label: "Required", kind, required: true, ...(kind === "bool" ? {} : { options: choices }) },
+			] }] });
+			try {
+				ui.component.handleInput(K.ctrlEnter);
+				assert.equal(ui.result(), undefined);
+				assert.match(ui.text(), /required field/);
+				ui.component.handleInput(K.enter);
+				assert.equal(ui.result(), undefined);
+				assert.match(ui.text(), /▸ Required/);
+				assert.doesNotMatch(ui.text(), /required field/);
+				if (kind !== "bool") ui.component.handleInput(K.down); // second option
+				ui.component.handleInput(K.down); // button
+				assert.match(ui.text(), /▸ \[ Enter Submit \]/);
+				ui.component.handleInput(K.enter);
+				assert.deepEqual(ui.result()?.answers?.[0]?.value, { required: kind === "bool" ? true : kind === "single" ? "A" : ["A"] });
+			} finally { ui.component.dispose(); }
+		});
 	}
-});
+}
 
 test("Tab switches every question kind and review, not form fields or review button", () => {
 	const ui = mount({ questions: [

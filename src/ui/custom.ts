@@ -577,17 +577,13 @@ export class AskUserComponent implements Component, Focusable {
 		}
 		if (field.kind === "bool") {
 			const current = form.present.has(field.name) ? form.values[field.name] : undefined;
-			if (matchesKey(data, Key.enter)) {
-				this.advanceFormField();
-				return;
-			}
-			if (!matchesKey(data, Key.space)) return;
+			if (!matchesKey(data, Key.space) && !matchesKey(data, Key.enter)) return;
 			this.setFormValue(field, typeof current === "boolean" ? !current : true, fieldIndex);
 			this.syncFormDraft(this.tab);
 			this.refresh();
 			return;
 		}
-		if (matchesKey(data, Key.space)) {
+		if (matchesKey(data, Key.space) || matchesKey(data, Key.enter)) {
 			if (field.kind === "single") this.setFormValue(field, field.options[cursor]!.label, fieldIndex);
 			else {
 				const current = Array.isArray(form.values[field.name]) ? [...form.values[field.name] as string[]] : [];
@@ -595,9 +591,6 @@ export class AskUserComponent implements Component, Focusable {
 				const next = current.includes(label) ? current.filter((entry) => entry !== label) : [...current, label];
 				this.setFormValue(field, field.options.filter((option) => next.includes(option.label)).map((option) => option.label), fieldIndex);
 			}
-		} else if (matchesKey(data, Key.enter)) {
-			this.advanceFormField();
-			return;
 		} else return;
 		form.optionCursors[fieldIndex] = cursor;
 		this.syncFormDraft(this.tab);
@@ -669,11 +662,7 @@ export class AskUserComponent implements Component, Focusable {
 				this.skipWithDefault();
 				return;
 			}
-			if (matchesKey(data, Key.enter)) {
-				this.commitAndAdvance();
-				return;
-			}
-			if (!matchesKey(data, Key.space)) return;
+			if (!matchesKey(data, Key.space) && !matchesKey(data, Key.enter)) return;
 			const draft = this.drafts[this.tab]!;
 			const next = draft.valueSet && typeof draft.value === "boolean" ? !draft.value : true;
 			this.drafts[this.tab] = { selections: [], freeText: "", usedDefault: false, value: next, valueSet: true };
@@ -705,7 +694,7 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 
-		if (matchesKey(data, Key.space)) {
+		if (matchesKey(data, Key.space) || matchesKey(data, Key.enter)) {
 			if (question.kind === "multi") {
 				this.toggleRow();
 			} else {
@@ -716,10 +705,6 @@ export class AskUserComponent implements Component, Focusable {
 				this.resetScroll();
 				this.refresh();
 			}
-			return;
-		}
-		if (matchesKey(data, Key.enter)) {
-			this.commitAndAdvance();
 			return;
 		}
 		if (matchesKey(data, "s")) {
@@ -771,7 +756,7 @@ export class AskUserComponent implements Component, Focusable {
 		const draft = this.drafts[this.tab]!;
 		if (draftIsEmpty(draft) && !question.hasDefault) {
 			this.notice = question.kind === "bool"
-				? "This question is required: press Space to set a boolean value."
+				? "This question is required: press Enter or Space to set a boolean value."
 				: this.hasInputBar(question)
 					? "This question is required: select an option or type text."
 					: "This question is required: select an option.";
@@ -1173,20 +1158,23 @@ export class AskUserComponent implements Component, Focusable {
 			const hints = ["Tab switch question", "Arrows focus"];
 			const form = this.forms[this.tab]!;
 			const field = question.fields?.[form.active];
-			if (field?.kind === "multi" || field?.kind === "bool") hints.push("Space toggle", "Enter next");
-			else if (field?.kind === "single") hints.push("Space select", "Enter next");
+			if (field?.kind === "multi" || field?.kind === "bool") hints.push("Enter/Space toggle");
+			else if (field?.kind === "single") hints.push("Enter/Space select");
 			else if (field) hints.push("Enter next");
 			else hints.push("Enter continue");
+			hints.push("Ctrl+Enter submit");
 			if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn scroll");
 			return withControls(hints);
 		}
 		if (question.kind === "bool") {
-			const hints = ["Tab switch", "Space toggle", "Enter confirm"];
+			const hints = ["Enter/Space toggle", "Ctrl+Enter submit", "Tab switch"];
 			if (question.hasDefault) hints.push("s use default");
 			return withControls(hints);
 		}
-		const hints = ["Tab switch", "Arrows focus", "Enter confirm"];
-		if (!this.isInputRow()) hints.push(question.kind === "multi" ? "Space toggle" : "Space select");
+		const hints = ["Tab switch", "Arrows focus"];
+		if (this.isInputRow()) hints.push("Enter confirm");
+		else hints.push(question.kind === "multi" ? "Enter/Space toggle" : "Enter/Space select");
+		hints.push("Ctrl+Enter submit");
 		if (question.hasDefault) hints.push("s use default");
 		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn preview");
 		if (this.isInputRow() && question.options.length > 0) hints.push("↑ back to options");

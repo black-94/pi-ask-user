@@ -52,22 +52,26 @@ test("disabled extra input cannot receive focus or hidden text from typing/down"
 		component.handleInput(K.down);
 		component.handleInput(K.down);
 		assert.ok(!component.render(80).join("\n").includes(CURSOR_MARKER));
-		component.handleInput(K.space);
 		component.handleInput(K.enter);
+		assert.equal(result(), undefined);
+		component.handleInput(K.ctrlEnter);
 		assert.deepEqual(result()?.answers?.[0]?.selections, ["B"]);
 		assert.equal(result()?.answers?.[0]?.freeText, undefined);
 	} finally { component.dispose(); }
 });
 
-test("disabled multi uses Space to toggle and Enter to confirm without changing selections", () => {
+test("disabled multi uses Enter and Space to toggle, Ctrl+Enter to submit", () => {
 	const { component, result } = mount({ allowFreeText: false, questions: [choice("multi")] });
 	try {
 		component.handleInput(K.enter);
 		assert.equal(result(), undefined);
-		component.handleInput(K.space);
+		assert.match(component.render(80).join("\n"), /▸ ▣ 1\. A/);
+		component.handleInput(K.space); // deselect A
+		component.handleInput(K.enter); // select A again
 		component.handleInput(K.down);
-		component.handleInput(K.space);
-		component.handleInput(K.enter);
+		component.handleInput(K.enter); // select B
+		assert.equal(result(), undefined);
+		component.handleInput(K.ctrlEnter);
 		assert.deepEqual(result()?.answers?.[0]?.selections, ["A", "B"]);
 	} finally { component.dispose(); }
 });
@@ -111,13 +115,13 @@ test("core rejects free text from a renderer when it is disabled", async () => {
 	assert.equal(result.error?.code, "internal");
 });
 
-test("bool Enter confirms false defaults; Space toggles and clears usedDefault", () => {
+test("bool Ctrl+Enter preserves false defaults; Enter toggles and clears usedDefault", () => {
 	for (const toggle of [false, true]) {
 		const { component, result } = mount({ questions: [{ title: "Bool", kind: "bool", default: false }] });
 		try {
 			assert.match(component.render(80).join("\n"), /\[✗\] False \(default\)/);
-			if (toggle) component.handleInput(K.space);
-			component.handleInput(K.enter);
+			if (toggle) component.handleInput(K.enter);
+			component.handleInput(K.ctrlEnter);
 			assert.equal(result()?.answers?.[0]?.value, toggle);
 			assert.equal(result()?.answers?.[0]?.usedDefault, !toggle);
 		} finally { component.dispose(); }
@@ -133,8 +137,8 @@ test("form bool is a single control and confirms/toggles false defaults", () => 
 			const text = component.render(80).join("\n");
 			assert.equal(text.split("\n").filter((line) => line.includes("[✗] False")).length, 1);
 			assert.doesNotMatch(text, /True/);
-			if (toggle) component.handleInput(K.space);
-			component.handleInput(K.enter);
+			if (toggle) component.handleInput(K.enter);
+			component.handleInput(K.down); // Submit button
 			component.handleInput(K.enter);
 			assert.deepEqual(result()?.answers?.[0]?.value, { enabled: toggle });
 			assert.equal(result()?.answers?.[0]?.usedDefault, !toggle);

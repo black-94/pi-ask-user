@@ -258,8 +258,8 @@ function answeringCtx(): ExtensionContext {
 						(result: unknown) => resolve(result),
 					);
 					queueMicrotask(() => {
-						component.handleInput?.(" ");
 						component.handleInput?.("\r");
+						component.handleInput?.("\x1b[13;5u");
 					});
 				}),
 		},
