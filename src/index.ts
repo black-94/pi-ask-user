@@ -23,7 +23,7 @@ export * from "./types.ts";
 export { askUser, askUserNormalized } from "./core.ts";
 export { createPiHost, createPiCustomRenderer, type PiHostOptions } from "./adapters/pi.ts";
 export { createAskUser, type AskUser, type CreateAskUserOptions } from "./ask.ts";
-export { createNativeRunner, type NativeDialogUI } from "./ui/native.ts";
+export { createNativeRunner, type NativeDialogUI, type NativeDialogOptions } from "./ui/native.ts";
 export {
 	AskUserComponent,
 	MIN_USABLE_ROWS,
@@ -109,6 +109,7 @@ const PROMPT_GUIDELINES = [
 	"If the tool reports the UI could not run, ask the user the question yourself in ordinary text instead.",
 	"Never invent an answer; on aborted or timeout, report it plainly and do not re-ask.",
 	"Use kind=bool for a real boolean. Use kind=simple-form with flat uniquely named fields when several typed values belong in one logical question; forms cannot nest.",
+	"Set allowFreeText=false to require option selections without supplemental text. Native single/bool then use selectors; native multi still uses a numbers-only text box.",
 ];
 
 /**

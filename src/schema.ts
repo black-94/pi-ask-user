@@ -30,7 +30,7 @@ const FIELD_KINDS = ["single", "multi", "input", "bool"] as const;
 const QUESTION_FIELDS = ["id", "title", "prompt", "kind", "options", "default", "fields"] as const;
 const FORM_FIELD_FIELDS = ["name", "label", "kind", "required", "options", "default"] as const;
 const OPTION_FIELDS = ["label", "description", "preview"] as const;
-const REQUEST_FIELDS = ["questions", "header", "displayMode", "timeoutPerQuestionMs"] as const;
+const REQUEST_FIELDS = ["questions", "header", "displayMode", "timeoutPerQuestionMs", "allowFreeText"] as const;
 const SAFE_FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const UNSAFE_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -77,6 +77,7 @@ const QuestionSchema = Type.Object({
 export const AskUserParams = Type.Object({
 	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: MAX_QUESTIONS }),
 	header: Type.Optional(Type.String({ maxLength: LIMITS.header })),
+	allowFreeText: Type.Optional(Type.Boolean({ description: "Allow supplemental/free-text answers on single/multi questions (default true). False hides the extra text input and requires option selections; native single/bool use selectors (including form fields), while native multi/text keep input boxes." })),
 	displayMode: Type.Optional(StringEnum(["overlay", "inline"] as const)),
 	timeoutPerQuestionMs: Type.Optional(Type.Number({ minimum: 0 })),
 }, { additionalProperties: false });
@@ -312,6 +313,10 @@ export function normalizeAskUserRequest(raw: unknown): { request: NormalizedRequ
 	if (rawQuestions.length === 0) throw new AskUserValidationError("At least 1 question is required.");
 	if (rawQuestions.length > MAX_QUESTIONS) throw new AskUserValidationError(`At most ${MAX_QUESTIONS} questions; received ${rawQuestions.length}.`);
 
+	if (raw.allowFreeText !== undefined && typeof raw.allowFreeText !== "boolean") {
+		throw new AskUserValidationError("allowFreeText must be a boolean.");
+	}
+	const allowFreeText = raw.allowFreeText !== false;
 	const warnings: string[] = [];
 	const usedIds = new Set<string>();
 	const questions: NormalizedQuestion[] = [];
@@ -338,12 +343,19 @@ export function normalizeAskUserRequest(raw: unknown): { request: NormalizedRequ
 		};
 		if (question.prompt !== undefined) normalized.prompt = question.prompt;
 		if (question.default !== undefined) normalized.default = question.default;
+		if (question.kind === "single" || question.kind === "multi") {
+			normalized.allowFreeText = allowFreeText;
+			if (!allowFreeText && question.hasDefault && !question.options.some((option) => option.label === String(question.default).trim())) {
+				throw new AskUserValidationError(`Question ${index + 1} default must match an option label when allowFreeText is false.`);
+			}
+		}
 		questions.push(normalized);
 	});
 
 	const timeoutPerQuestionMs = readTimeoutPerQuestionMs(raw.timeoutPerQuestionMs);
 	const request: NormalizedRequest = {
 		questions,
+		allowFreeText,
 		displayMode: readDisplayMode(raw.displayMode),
 		timeoutPerQuestionMs,
 		totalTimeoutMs: timeoutPerQuestionMs * questions.length,

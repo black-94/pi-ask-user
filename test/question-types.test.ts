@@ -254,14 +254,22 @@ test("native form uses remaining time and supports cancel, abort, and timeout mi
 	assert.equal(abortCalls, 2);
 });
 
-test("custom bool uses tick/cross controls and submits false", () => {
+test("custom bool uses one toggle control and submits false", () => {
 	const { component, result } = mount(request({ questions: [{ title: "Proceed?", kind: "bool" }] }));
-	assert.match(component.render(60).join("\n"), /✓.*True/);
-	assert.match(component.render(60).join("\n"), /✗.*False/);
-	component.handleInput(K.down);
-	component.handleInput(K.enter);
-	assert.equal(result()?.kind, "submitted");
-	assert.equal(result()?.answers?.[0]?.value, false);
+	try {
+		assert.match(component.render(60).join("\n"), /\[ \] True \(unset\)/);
+		component.handleInput(K.space);
+		const checked = component.render(60).join("\n");
+		assert.match(checked, /\[✓\] True/);
+		assert.doesNotMatch(checked, /False/);
+		component.handleInput(K.space);
+		const crossed = component.render(60).join("\n");
+		assert.match(crossed, /\[✗\] False/);
+		assert.doesNotMatch(crossed, /True/);
+		component.handleInput(K.enter);
+		assert.equal(result()?.kind, "submitted");
+		assert.equal(result()?.answers?.[0]?.value, false);
+	} finally { component.dispose(); }
 });
 
 test("custom bool applies an explicit false default without a truthiness bug", () => {
@@ -350,13 +358,15 @@ test("custom form keeps focused fields visible and IME cursor positioned in narr
 	component.dispose();
 });
 
-test("custom form Space commits the focused boolean choice", () => {
+test("custom form Space toggles the boolean value", () => {
 	const { component, result } = mount(request({ questions: [{ title: "F", kind: "simple-form", fields: [
 		{ name: "ok", label: "OK", kind: "bool", required: true },
 	] }] }));
 	try {
-		component.handleInput(K.right);
 		component.handleInput(K.space);
+		assert.match(component.render(80).join("\n"), /\[✓\] True/);
+		component.handleInput(K.space);
+		assert.match(component.render(80).join("\n"), /\[✗\] False/);
 		component.handleInput(K.ctrlEnter);
 		assert.deepEqual(result()?.answers?.[0]?.value, { ok: false });
 	} finally { component.dispose(); }

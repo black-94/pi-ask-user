@@ -11,12 +11,21 @@ import type {
 	NormalizedRequest,
 } from "../types.ts";
 
-/** Minimal shape of the Pi UI context needed by the native route. */
+export interface NativeDialogOptions {
+	signal?: AbortSignal;
+	timeout?: number;
+}
+
+/** Native select is required for typed controls when allowFreeText is false. */
 export interface NativeDialogUI {
-	input(title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }): Promise<string | undefined>;
+	input(title: string, placeholder?: string, opts?: NativeDialogOptions): Promise<string | undefined>;
+	select?(title: string, options: string[], opts?: NativeDialogOptions): Promise<string | undefined>;
 }
 
 function placeholderFor(question: NormalizedQuestion): string {
+	if (question.allowFreeText === false && (question.kind === "single" || question.kind === "multi")) {
+		return question.kind === "single" ? "one option number, e.g. 2" : "option numbers, e.g. 1,3";
+	}
 	switch (question.kind) {
 		case "single": return 'e.g. 2 or "2 | note" or type free text';
 		case "multi": return 'e.g. 1,3 or "1,3 | note" or type free text';
@@ -26,7 +35,7 @@ function placeholderFor(question: NormalizedQuestion): string {
 	}
 }
 
-function buildPrompt(request: NormalizedRequest, question: NormalizedQuestion, invalid: string | undefined): string {
+function buildPrompt(request: NormalizedRequest, question: NormalizedQuestion, invalid: string | undefined, typed = false): string {
 	const lines: string[] = [];
 	if (request.header?.trim()) lines.push(request.header.trim());
 	lines.push(`[Question ${question.index + 1}/${request.questions.length}] ${question.title}`);
@@ -35,8 +44,8 @@ function buildPrompt(request: NormalizedRequest, question: NormalizedQuestion, i
 		const description = option.description?.trim();
 		lines.push(`  ${index + 1}. ${option.label}${description ? ` — ${description}` : ""}`);
 	});
-	if (question.hasDefault && question.default !== undefined) lines.push(`Default: ${String(question.default)} (empty box uses it)`);
-	lines.push(nativeInputHint(question));
+	if (question.hasDefault && question.default !== undefined) lines.push(`Default: ${String(question.default)}${typed ? "" : " (empty box uses it)"}`);
+	if (!typed) lines.push(nativeInputHint(question));
 	const body = lines.join("\n");
 	return invalid ? `⚠ Invalid input: ${invalid}\n\n${body}` : body;
 }
@@ -56,6 +65,7 @@ function buildFieldPrompt(
 	field: NormalizedFormField,
 	fieldIndex: number,
 	invalid: string | undefined,
+	typed = false,
 ): string {
 	const lines: string[] = [];
 	if (request.header?.trim()) lines.push(request.header.trim());
@@ -66,7 +76,8 @@ function buildFieldPrompt(
 		const description = option.description?.trim();
 		lines.push(`  ${index + 1}. ${option.label}${description ? ` — ${description}` : ""}`);
 	});
-	if (field.hasDefault) lines.push(`Default: ${Array.isArray(field.default) ? field.default.join(", ") : String(field.default)} (empty box uses it)`);
+	if (field.hasDefault) lines.push(`Default: ${Array.isArray(field.default) ? field.default.join(", ") : String(field.default)}${typed ? "" : " (empty box uses it)"}`);
+	if (typed) return lines.join("\n");
 	if (field.kind === "bool") lines.push("Enter exactly true or false (case-insensitive).");
 	else if (field.kind === "single") lines.push("Enter exactly one option number; arbitrary text is not accepted in a form.");
 	else if (field.kind === "multi") lines.push("Enter option numbers separated by commas/spaces; arbitrary text is not accepted in a form.");
@@ -108,13 +119,21 @@ export function createNativeRunner(ui: NativeDialogUI): NativeDialogRunner {
 	return {
 		async run({ request, deadline, signal, onUpdate }: AskUIInput): Promise<AskUIOutcome> {
 			const answers: AskUserAnswer[] = [];
-			const ask = async (title: string, placeholder: string): Promise<{ raw?: string; outcome?: AskUIOutcome }> => {
+			const usesTypedControl = (question: NormalizedQuestion): boolean =>
+				question.kind !== "input" && question.kind !== "multi" && (request.allowFreeText === false || question.allowFreeText === false);
+			// Refuse before showing any dialogs; never substitute text input for a missing selector.
+			const needsSelect = request.questions.some((question) => usesTypedControl(question) &&
+				(question.kind !== "simple-form" || question.fields?.some((field) => field.kind === "bool" || field.kind === "single")));
+			if (needsSelect && typeof ui.select !== "function") {
+				return { kind: "error", message: "allowFreeText=false requires native select dialogs, but this host does not provide ui.select. No text-input fallback was used." };
+			}
+			const dialog = async (invoke: (opts: NativeDialogOptions) => Promise<string | undefined>): Promise<{ raw?: string; outcome?: AskUIOutcome }> => {
 				if (signal?.aborted) return { outcome: { kind: "abort" } };
 				if (deadline.expired()) return { outcome: { kind: "timeout" } };
 				const opts: { signal?: AbortSignal; timeout?: number } = { timeout: deadline.remainingMs() };
 				if (signal) opts.signal = signal;
 				try {
-					const raw = await ui.input(title, placeholder, opts);
+					const raw = await invoke(opts);
 					if (signal?.aborted) return { outcome: { kind: "abort" } };
 					if (deadline.expired()) return { outcome: { kind: "timeout" } };
 					if (raw !== undefined) return { raw };
@@ -126,6 +145,26 @@ export function createNativeRunner(ui: NativeDialogUI): NativeDialogRunner {
 				}
 			};
 
+			const ask = (title: string, placeholder: string) => dialog((opts) => ui.input(title, placeholder, opts));
+			const select = (title: string, options: string[]) => dialog((opts) => ui.select!(title, options, opts));
+			const typedField = async (title: string, field: NormalizedFormField): Promise<{
+				value?: boolean | string | string[]; usedDefault?: boolean; outcome?: AskUIOutcome;
+			}> => {
+				const options = field.kind === "bool" ? ["✓ True", "✗ False"] : field.options.map((option, index) =>
+					`${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`);
+				const defaultOption = `Use default: ${String(field.default)}`;
+				const skip = "Skip optional field";
+				const response = await select(title, [
+					...options, ...(field.hasDefault ? [defaultOption] : []), ...(!field.required ? [skip] : []),
+				]);
+				if (response.outcome) return { outcome: response.outcome };
+				if (field.hasDefault && response.raw === defaultOption) return { value: cloneDefault(field.default!), usedDefault: true };
+				if (!field.required && response.raw === skip) return {};
+				const index = options.indexOf(response.raw!);
+				if (index < 0) return { outcome: { kind: "error", message: "Native select returned an unknown option." } };
+				return { value: field.kind === "bool" ? index === 0 : field.options[index]!.label, usedDefault: false };
+			};
+
 			for (const question of request.questions) {
 				if (question.kind === "simple-form") {
 					const value: AskUserFormValue = {};
@@ -133,6 +172,14 @@ export function createNativeRunner(ui: NativeDialogUI): NativeDialogRunner {
 					const fields = question.fields ?? [];
 					for (let fieldIndex = 0; fieldIndex < fields.length; fieldIndex += 1) {
 						const field = fields[fieldIndex]!;
+						if (usesTypedControl(question) && (field.kind === "bool" || field.kind === "single")) {
+							onUpdate?.(`Waiting for the user to answer question ${question.index + 1}/${request.questions.length}, field ${fieldIndex + 1}/${fields.length}…`);
+							const response = await typedField(buildFieldPrompt(request, question, field, fieldIndex, undefined, true), field);
+							if (response.outcome) return response.outcome;
+							if (response.value !== undefined) value[field.name] = response.value;
+							usedDefault ||= response.usedDefault === true;
+							continue;
+						}
 						let invalid: string | undefined;
 						for (;;) {
 							onUpdate?.(`Waiting for the user to answer question ${question.index + 1}/${request.questions.length}, field ${fieldIndex + 1}/${fields.length}…`);
@@ -163,6 +210,26 @@ export function createNativeRunner(ui: NativeDialogUI): NativeDialogRunner {
 						}
 					}
 					answers.push({ index: question.index, id: question.id, title: question.title, kind: question.kind, selections: [], usedDefault, value });
+					continue;
+				}
+
+				if (usesTypedControl(question)) {
+					onUpdate?.(`Waiting for the user to answer question ${question.index + 1}/${request.questions.length}…`);
+					const field: NormalizedFormField = {
+						name: question.id, label: question.title, kind: question.kind as "bool" | "single",
+						required: true, options: question.options, hasDefault: question.hasDefault,
+						default: typeof question.default === "string" ? question.default.trim() : question.default,
+					};
+					const response = await typedField(buildPrompt(request, question, undefined, true), field);
+					if (response.outcome) return response.outcome;
+					const selections = question.kind === "bool" ? [] : question.options
+						.map((option, index) => ({ option, index }))
+						.filter(({ option }) => response.value === option.label)
+						.map(({ index }) => index);
+					answers.push(toAnswer(question, {
+						selections, freeText: "", usedDefault: response.usedDefault === true,
+						...(question.kind === "bool" ? { value: response.value as boolean, valueSet: true } : {}),
+					}));
 					continue;
 				}
 
@@ -202,7 +269,9 @@ export function createNativeRunner(ui: NativeDialogUI): NativeDialogRunner {
 							answers.push(toAnswer(question, fallback));
 							break;
 						}
-						invalid = question.kind === "input" ? "This question is required and cannot be empty." : "This question is required; enter an option number or free text.";
+						invalid = question.kind === "input" ? "This question is required and cannot be empty."
+							: question.allowFreeText === false ? "This question is required; enter option numbers only."
+							: "This question is required; enter an option number or free text.";
 						continue;
 					}
 					answers.push(toAnswer(question, { selections: parsed.value.selections, freeText: parsed.value.freeText ?? "", usedDefault: false, valueSet: false }));

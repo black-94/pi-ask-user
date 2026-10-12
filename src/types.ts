@@ -5,7 +5,7 @@
  * answered through one of two routes:
  *
  *  - `custom` — a custom terminal UI (only a real Pi TUI)
- *  - `native` — native input dialogs (`ctx.hasUI` + callable input), one logical
+ *  - `native` — native dialogs (`ctx.hasUI` + callable input), one logical
  *    question at a time (a form uses sequential per-field dialogs)
  *
  * The route is resolved **once, when the host adapter is created**, from
@@ -141,6 +141,12 @@ export interface AskUserRequest {
 	questions: AskUserQuestion[];
 	/** Optional heading shown above the questionnaire. */
 	header?: string;
+	/**
+	 * Allow supplemental/free-text answers on single/multi questions. Defaults to true.
+	 * False also uses native selectors for single/bool (including form fields);
+	 * native multi/text continue using input boxes.
+	 */
+	allowFreeText?: boolean;
 	/** Custom-UI presentation. Defaults to `overlay`. */
 	displayMode?: AskUserDisplayMode;
 	/**
@@ -403,6 +409,8 @@ export interface NormalizedQuestion {
 	prompt?: string;
 	kind: QuestionKind;
 	options: AskUserOption[];
+	/** False disables free text for single/multi; absent preserves legacy behavior. */
+	allowFreeText?: boolean;
 	default?: string | boolean;
 	hasDefault: boolean;
 	/** Present for `simple-form`; omitted by older already-normalized callers. */
@@ -421,6 +429,8 @@ export interface NormalizedFormField {
 
 export interface NormalizedRequest {
 	header?: string;
+	/** Absent in older normalized callers means true. */
+	allowFreeText?: boolean;
 	questions: NormalizedQuestion[];
 	displayMode: AskUserDisplayMode;
 	timeoutPerQuestionMs: number;

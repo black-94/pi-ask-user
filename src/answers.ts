@@ -162,6 +162,7 @@ export function validateAnswer(question: NormalizedQuestion, candidate: unknown)
 		if (answer.selections.length > 0) return "input answers cannot contain selections";
 		return (answer.freeText ?? "").trim() === "" ? "input answer is empty" : undefined;
 	}
+	if (question.allowFreeText === false && answer.freeText !== undefined) return "freeText is disabled for this question";
 	if (new Set(answer.selections).size !== answer.selections.length) return "selections contain duplicate labels";
 	if (!answer.selections.every((label) => question.options.some((option) => option.label === label))) return "selection is not an option label";
 	if (question.kind === "single" && answer.selections.length > 1) return "single answer contains multiple selections";

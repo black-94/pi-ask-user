@@ -66,12 +66,14 @@ export function parseNativeAnswer(question: NormalizedQuestion, raw: string): Pa
 
 	// No number in the box: the (optional) right side is the free input.
 	if (leftTrim === "") {
+		if (question.allowFreeText === false) return { ok: false, error: "Free text is disabled; enter option numbers only." };
 		return { ok: true, value: { selections: [], freeText: comment, empty: comment === "" } };
 	}
 
 	const isStrictList = DIGIT_SEPARATOR_ONLY.test(leftTrim);
 	const isListAttempt = isStrictList || NUMBER_LIST_ATTEMPT.test(leftTrim);
 	if (!isListAttempt) {
+		if (question.allowFreeText === false) return { ok: false, error: "Free text is disabled; enter option numbers only." };
 		// Free text, taken verbatim including any `|`.
 		return { ok: true, value: { selections: [], freeText: trimmed, empty: false } };
 	}
@@ -96,6 +98,9 @@ export function parseNativeAnswer(question: NormalizedQuestion, raw: string): Pa
 		return { ok: false, error: "This is a single-select question; enter only one number." };
 	}
 
+	if (question.allowFreeText === false && pipeIndex >= 0) {
+		return { ok: false, error: "Notes are disabled; enter option numbers only." };
+	}
 	const ordered = question.kind === "single" ? unique : [...unique].sort((a, b) => a - b);
 	const value: ParsedAnswer = {
 		selections: question.kind === "single" ? [ordered[0]!] : ordered,
@@ -107,6 +112,11 @@ export function parseNativeAnswer(question: NormalizedQuestion, raw: string): Pa
 
 /** Render the per-question input instruction used by the native route. */
 export function nativeInputHint(question: NormalizedQuestion): string {
+	if (question.allowFreeText === false && (question.kind === "single" || question.kind === "multi")) {
+		return question.kind === "single"
+			? "Single select. Reply with one option number only (e.g. 2)."
+			: "Multi select. Reply with option numbers only, separated by commas (e.g. 1,3).";
+	}
 	switch (question.kind) {
 		case "single":
 			return question.options.length > 0

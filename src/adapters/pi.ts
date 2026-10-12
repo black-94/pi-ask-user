@@ -59,7 +59,8 @@ export interface PiHostOptions {
  *
  *  - `customUI`      — only in `tui` mode with a callable `ctx.ui.custom()`.
  *  - `nativeDialogs` — only when `ctx.hasUI` and `ctx.ui.input` is callable,
- *    i.e. native input dialogs shown one question at a time. RPC reports
+ *    i.e. native dialogs shown one question at a time. Requests disabling extra
+ *    text additionally require `ui.select` for single/bool controls. RPC reports
  *    `hasUI: true`, so a nonresponsive RPC client is *not* pre-judged: the
  *    attempt is made and the shared deadline turns silence into an actionable
  *    `timeout`.

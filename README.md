@@ -1,7 +1,7 @@
 # @black942026/pi-ask-user
 
 A Pi extension for asking structured questions through interactive terminal
-or native input dialogs. Supports single-choice, multiple-choice, free-text,
+or native dialogs. Supports single-choice, multiple-choice, free-text,
 boolean, and flat typed form answers, with configurable timeouts and cancellation.
 
 Install the package to add the **`ask_user`** tool to Pi. Other extensions can
@@ -18,7 +18,7 @@ is created:
 | Route | Runs when | The user sees |
 | --- | --- | --- |
 | `custom` | the host is a real Pi TUI with a bound renderer | a tabbed terminal dialog: options, boolean controls, forms, text input, and Markdown previews |
-| `native` | `ctx.hasUI` with a callable `ctx.ui.input` (TUI, RPC/ACP) | native dialogs, one logical question at a time; form fields are sequential dialogs |
+| `native` | `ctx.hasUI` with a callable `ctx.ui.input` (TUI, RPC/ACP) | native dialogs, one logical question at a time; with `allowFreeText: false`, single/bool use `ctx.ui.select`; multi/text keep input boxes; form fields are sequential dialogs |
 
 Only these two routes exist, and the route belongs to the host: it is configured
 or probed when the host is created, never per request.
@@ -57,6 +57,7 @@ The registered tool name is exactly **`ask_user`**.
 | `fields[].default` | `(boolean \| string \| string[])?` | boolean, selected label, selected-label array, or text according to field kind |
 | `questions[].id` | `string?` | non-empty; generated as `q1`, `q2`, … when omitted |
 | `header` | `string?` | heading above the questionnaire |
+| `allowFreeText` | `boolean?` | default `true`; `false` removes supplemental/free-text answers on single/multi questions; native single/bool (including form fields) use selectors while multi/text keep input boxes |
 | `displayMode` | `"overlay" \| "inline"?` | custom route only; default `overlay`; a user-configured preference overrides it |
 | `timeoutPerQuestionMs` | `number?` | base timeout per question; default `60000`; a user-configured preference overrides it |
 
@@ -66,6 +67,37 @@ as `invalid_request`; a `single`/`multi` question or field without options is an
 error. An explicit legacy `kind: "input"` keeps its existing behavior: supplied
 options are validated, then dropped. Duplicate option labels are de-duplicated
 and reported in `warnings`.
+
+### Disable supplemental text
+
+Set top-level `allowFreeText: false` to hide the custom UI's bottom extra input
+on single/multi questions and require option selections. Regular `input`
+questions and form text fields remain editable. Choice defaults must match an
+option label when supplemental text is disabled.
+
+```json
+{
+  "allowFreeText": false,
+  "questions": [
+    { "title": "Environment", "kind": "single", "options": [{ "label": "dev" }, { "label": "prod" }] }
+  ]
+}
+```
+
+On the native route with this flag:
+
+- Single-choice questions/fields use `ctx.ui.select`, returning option labels.
+- Boolean questions/fields use a True/False selector. We deliberately avoid
+  `ctx.ui.confirm`: Pi returns `false` both for a negative answer and dismissal,
+  so a selector is necessary to preserve cancellation semantics.
+- Multi-choice questions/fields **still use a text box**, accepting numbers such
+  as `1,3`; standalone multi questions reject prose and `| note`.
+- Text questions/fields keep their text boxes.
+- Selectors provide explicit default/skip actions where applicable. A host
+  without `ui.select` refuses requests that need it rather than falling back
+  to text input. The shared deadline and abort signal apply to every dialog.
+
+Omitting the flag (or setting `true`) preserves the native input-box behavior.
 
 Forms are flat. Field names cannot contain dots, brackets, spaces, or path-like
 syntax, and `__proto__`, `constructor`, and `prototype` are rejected. Names must
@@ -338,16 +370,20 @@ hidden, restore it first with its show/hide key before pressing `Alt+Q`.
 
 Legacy `single`/`multi`/`input` questions retain their controls: `Tab` and
 `Shift+Tab` switch question/review tabs, arrows move within choices, `Space`
-selects, and `Enter` confirms. A standalone `bool` shows explicit `✓ True` and
-`✗ False` controls; arrows choose, `Space` sets the value, and `Enter` sets and
-continues. A required boolean without a default begins unset, so the user must
-choose; `false` is an answered value.
+selects, and `Enter` confirms. With `allowFreeText: false`, multi-choice uses `Space` to
+toggle selections and `Enter` to continue (there is no extra text row).
+A standalone `bool` shows **one** control: `[✓] True` or `[✗] False`.
+`Space` toggles, up/left sets true, down/right sets false, and `Enter` confirms
+and continues. An unset boolean shows `[ ] True (unset)`; Enter explicitly
+accepts true. Defaults are displayed immediately, and confirming a false
+default keeps it false. `false` is an answered value, never an empty answer.
 
 A `simple-form` is one question tab with all fields in one scrollable view:
 
 - `Tab` / `Shift+Tab` cycles fields and the Continue/Submit button.
 - `Ctrl+Left` / `Ctrl+Right` switches questionnaire tabs from any question.
-- Boolean fields use arrows plus `Space`/`Enter`; single-choice fields use
+- Boolean fields use the same single toggle control (`Space` toggles, arrows set,
+  `Enter` confirms and moves on); single-choice fields use
   arrows plus `Space`/`Enter`; multi-choice fields use `Space` to toggle and
   `Enter` to move on; text fields use `Enter` to move on.
 - `Ctrl+Enter` validates and submits the questionnaire. Required missing/empty
@@ -448,7 +484,7 @@ for a refused explicit config, names the requested route.
   correlation id, route, and status.
 - **The overlay toggle is overlay-only.** Inline and native register no raw
   input listener; hiding never pauses the deadline.
-- **The native route uses single-line `input`**, one logical question at a time (not
+- **The native route defaults to single-line `input`**, one logical question at a time (not
   `editor`, which accepts no timeout/signal). The number and an optional note
   share one box: `2`, `2 | note`, or free text; a number list may be
   comma/space/`，`/`、` separated (`1,3`). Out-of-range or malformed numbers
@@ -456,11 +492,14 @@ for a refused explicit config, names the requested route.
   A form opens sequential per-field dialogs under the same questionnaire
   deadline: boolean fields accept `true`/`false`, form choices accept only
   option numbers and return labels, and optional empty fields are omitted (or
-  use their field default). Cancel/abort/timeout at any field terminates the form.
+  use their field default). With `allowFreeText: false`, single/bool use native
+  selectors (including form fields); multi stays a numbers-only text box, and
+  text fields stay editable. Cancel/abort/timeout at any field terminates the form.
 - **Tool calls run sequentially** (`executionMode: "sequential"`).
-- **Short terminals degrade in a defined order:** the pinned legacy free-input row and
+- **Short terminals degrade in a defined order:** when enabled, the pinned legacy free-input row and
   the key hints survive first, down to `MIN_USABLE_ROWS` (3); 0 rows renders
-  nothing. Forms reserve a visible row for the focused field and auto-scroll it.
+  nothing. Bool, forms, and choices without supplemental text reserve a visible
+  row for the focused control and auto-scroll it.
   `render(width)` never exceeds the requested width or `terminal.rows`.
 
 ## Development
