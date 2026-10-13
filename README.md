@@ -376,33 +376,35 @@ In the custom terminal UI, all question kinds share the same controls:
   Arrows never change values or selections. A standalone `bool` has two
   horizontal focus targets, so Left/Right moves its focus between **True** and
   **False**, while Up/Down leaves it unchanged.
-- The focused control gets a **subtle background tint** (the theme's
-  `selectedBg`), drawn only behind the focused option region and removed when
-  the dialog loses focus. It is a low-contrast highlight that adapts to the
-  active light and dark palette, and the control keeps its semantic foreground
-  colors (True/success, False/error, accent, muted) on top of it. Whether a
-  *custom* theme's `selectedBg` foreground pairing stays readable is up to that
-  theme: Pi only documents a body-text contrast floor for the `system` theme,
-  not for arbitrary user themes. The tint marks *focus* only; the
-  check/cross/box markers mark the *selection*, so the two never blur together.
-- `Space` toggles booleans/multiple-choice selections or selects the focused
-  single-choice option. In a text input, Space inserts a space.
-- `Enter` selects the focused single-choice option or toggles the boolean,
-  then continues to the next question (or submits a one-question questionnaire).
-  On multiple-choice options it only toggles, keeping focus in place. In text
-  inputs and on Continue/Submit buttons, it confirms/continues.
+- The focused control is marked by a `▸` triangle drawn in front of it — the
+  focused `bool` side, the `single`/`multi` option cursor, or the active
+  `simple-form` control — using the same accent marker as the single-choice
+  cursor. There is **no focus background**: the check/cross/box markers mark the
+  *selection*, the triangle marks the *focus*, and the two stay independent, so
+  the renderer never emits a background color for a focused control.
+- `Space` selects the focused option — a `bool` side, a `single` option, or a
+  `multi` toggle — without continuing. In a text input, Space inserts a space.
+- `Enter` selects the focused option and continues to the next question (or
+  submits a one-question questionnaire). On multiple-choice options it only
+  toggles, keeping focus in place. In text inputs and on Continue/Submit
+  buttons, it confirms/continues.
 - `Ctrl+Enter` validates and submits the whole questionnaire without changing
   the focused control. Required unanswered questions block submission; defaults
   can still be used.
 
-A standalone `bool` shows **both** choices side by side on one line:
-`[✓] True  [ ] False` or `[ ] True  [✗] False`. Only the selected side carries a
-mark (a check for True, a cross for False); the unselected brackets stay empty.
-An unset boolean shows `[ ] True  [ ] False (unset)` and becomes true when Enter
-or Space is pressed. Defaults are displayed immediately; Enter toggles and
-continues, Space only toggles, while Ctrl+Enter submits them unchanged.
-Left/Right moves the focus highlight between True and False without changing the
-value. `false` is an answered value, never an empty answer.
+A standalone `bool` shows **both** choices side by side on one line, for example
+`▸ [ ] True    [ ] False` (nothing selected, focus on True) or
+`  [✓] True  ▸ [ ] False` (True selected, focus on False). Each side is prefixed
+by the focus triangle (`▸`) or two spaces, so the arrow marks the horizontal
+focus exactly like the single-choice cursor; the check/cross mark appears only
+on the selected side and the unselected brackets stay empty. An unset boolean
+shows `▸ [ ] True    [ ] False (unset)` with the initial focus on True.
+Left/Right moves only the arrow and never changes the value. Space and Enter
+select the focused side: Space selects and stays, Enter selects and continues,
+and re-selecting an already selected side never flips it, so pressing Space
+twice is idempotent. `false` is an answered value, never an empty answer.
+Defaults are displayed immediately with the initial focus on the selected side,
+and Ctrl+Enter submits them unchanged.
 
 A `simple-form` is one question tab with all fields in one scrollable view:
 
@@ -415,18 +417,19 @@ A `simple-form` is one question tab with all fields in one scrollable view:
   beginning/end of the form.
 - `Tab` / `Shift+Tab` switches question/review tabs, preserving field focus and values.
   `Ctrl+Left` / `Ctrl+Right` remains an alternate question-tab shortcut.
-- `Enter` toggles boolean fields or selects single-choice options, then moves
-  to the next field or Continue/Submit button. `Space` changes the value without
-  moving focus. For multi fields, both keys only toggle; use arrows to move on.
+- `Enter` selects the focused boolean side or single-choice option, then moves
+  to the next field or Continue/Submit button. `Space` selects the focused side
+  without moving focus. For multi fields, both keys only toggle; use arrows to
+  move on. Selecting the already selected `bool`/`single` side never flips it.
   Text fields also use `Enter` to move on. Optional unset fields remain omitted.
 - `Ctrl+Enter` validates and submits the questionnaire. Required missing/empty
   fields focus the first invalid field. `PageUp` / `PageDown` scrolls long form
   or preview content.
 - `Esc`, `Alt+Q`, and overlay show/hide keep their existing behavior.
 
-Form choice controls follow the same focus styling as standalone questions: the
-focused `bool` side, `single`, or `multi` option gets the subtle `selectedBg`
-tint, and it disappears when the dialog loses focus.
+Form controls follow the same focus styling as standalone questions: the
+focused `bool` side, `single`, or `multi` option is prefixed by a `▸` triangle,
+and there is no focus background.
 
 The active form field's input or selected option is automatically scrolled into view. Rendering is bounded
 by both terminal width and rows, including narrow/short terminals. Focus is

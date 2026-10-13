@@ -6,7 +6,6 @@ import { normalizeAskUserRequest } from "../src/schema.ts";
 import { AskUserComponent, type CustomUIResult } from "../src/ui/custom.ts";
 
 const K = { up: "\x1b[A", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C", enter: "\r", space: " ", tab: "\t", shiftTab: "\x1b[Z", ctrlEnter: "\x1b[13;5u" };
-const arrows = [K.up, K.down, K.left, K.right];
 const choices = [{ label: "A" }, { label: "B" }];
 
 function mount(raw: unknown) {
@@ -24,42 +23,49 @@ function mount(raw: unknown) {
 
 for (const displayMode of ["overlay", "inline"]) {
 	for (const initial of [undefined, false, true]) {
-		test(`${displayMode}: bool arrows preserve values; Space stays and Enter toggles and submits (${initial})`, () => {
-			const ui = mount({ displayMode, questions: [{ title: "Bool", kind: "bool", ...(initial === undefined ? {} : { default: initial }) }] });
-			try {
-				const before = ui.text();
-				for (const key of [...arrows, "\x10", "\x0e"]) {
-					ui.component.handleInput(key);
-					assert.equal(ui.text(), before);
-				}
-				assert.match(before, /Enter toggle & next/);
-				ui.component.handleInput(K.space);
-				assert.equal(ui.result(), undefined);
-				const next = initial === undefined ? true : !initial;
-				assert.match(ui.text(), next ? /\[✓\] True/ : /\[✗\] False/);
-				assert.doesNotMatch(ui.text(), /\(default\)|\(unset\)/);
-				ui.component.handleInput(K.enter);
-				assert.equal(ui.result()?.kind, "submitted");
-				assert.equal(ui.result()?.answers?.[0]?.value, !next);
-				assert.equal(ui.result()?.answers?.[0]?.usedDefault, false);
-			} finally { ui.component.dispose(); }
-		});
-
-		test(`${displayMode}: bool Enter advances directly from unset/default (${initial})`, () => {
+		test(`${displayMode}: bool Space selects the focused side without continuing; Enter selects and advances (${initial})`, () => {
 			const ui = mount({ displayMode, questions: [
 				{ title: "Bool", kind: "bool", ...(initial === undefined ? {} : { default: initial }) },
 				{ title: "After", kind: "input" },
 			] });
 			try {
-				ui.component.handleInput(K.enter);
+				assert.match(ui.text(), /Enter select & next/);
+				// Default focus is the selected side, else True.
+				assert.match(ui.text(), initial === false ? /▸ \[[✗ ]\] False/ : /▸ \[[✓ ]\] True/);
+				const selected = initial === undefined ? true : initial;
+				ui.component.handleInput(K.space); // select the focused side, no continue
 				assert.equal(ui.result(), undefined);
+				assert.match(ui.text(), /1\/2\. Bool/);
+				assert.match(ui.text(), selected ? /▸ \[✓\] True/ : /▸ \[✗\] False/);
+				assert.doesNotMatch(ui.text(), /\(default\)|\(unset\)/);
+				ui.component.handleInput(K.space); // re-selecting never flips it
+				assert.match(ui.text(), selected ? /▸ \[✓\] True/ : /▸ \[✗\] False/);
+				ui.component.handleInput(K.enter); // select the focused side + continue
 				assert.match(ui.text(), /2\/2\. After/);
 				ui.component.handleInput("ready");
 				ui.component.handleInput(K.enter);
 				assert.match(ui.text(), /Review before submitting/);
 				ui.component.handleInput(K.enter);
-				assert.equal(ui.result()?.answers?.[0]?.value, initial === undefined ? true : !initial);
+				assert.equal(ui.result()?.answers?.[0]?.value, selected);
 				assert.equal(ui.result()?.answers?.[0]?.usedDefault, false);
+			} finally { ui.component.dispose(); }
+		});
+
+		test(`${displayMode}: bool arrows move only the focus arrow, never the value (${initial})`, () => {
+			const ui = mount({ displayMode, questions: [{ title: "Bool", kind: "bool", ...(initial === undefined ? {} : { default: initial }) }] });
+			try {
+				assert.match(ui.text(), initial === false ? /▸ \[[✗ ]\] False/ : /▸ \[[✓ ]\] True/);
+				const before = ui.text();
+				for (const key of [K.up, K.down, "\x10", "\x0e"]) {
+					ui.component.handleInput(key);
+					assert.equal(ui.text(), before, "non-horizontal keys must not change a standalone bool");
+				}
+				ui.component.handleInput(K.left); // boundary when already on True
+				ui.component.handleInput(K.right); // now deterministically on False
+				assert.match(ui.text(), /▸ \[[✓✗ ]\] False/);
+				ui.component.handleInput(K.left);
+				assert.match(ui.text(), /▸ \[[✓✗ ]\] True/);
+				assert.equal(ui.result(), undefined, "navigation must not submit");
 			} finally { ui.component.dispose(); }
 		});
 	}
@@ -158,11 +164,12 @@ for (const displayMode of ["overlay", "inline"]) {
 			{ name: "untouched", label: "Untouched", kind: "bool" },
 		] }] });
 		try {
-			assert.match(ui.text(), /Enter toggle & next/);
-			ui.component.handleInput(K.space);
+			assert.match(ui.text(), /Enter select & next/);
+			ui.component.handleInput(K.right); // move the bool focus off the true default
+			ui.component.handleInput(K.space); // select False, staying on the field
 			assert.match(ui.text(), /▸ Bool/);
-			assert.match(ui.text(), /\[✗\] False/);
-			ui.component.handleInput(K.enter);
+			assert.match(ui.text(), /▸ \[✗\] False/);
+			ui.component.handleInput(K.enter); // select False (already focused) + advance
 			assert.match(ui.text(), /▸ Single/);
 			assert.match(ui.text(), /Enter select & next/);
 			ui.component.handleInput(K.left); // focus A
@@ -179,7 +186,7 @@ for (const displayMode of ["overlay", "inline"]) {
 			assert.match(ui.text(), /▸ ▢ B/);
 			assert.equal(ui.result(), undefined);
 			ui.component.handleInput(K.ctrlEnter);
-			assert.deepEqual(ui.result()?.answers?.[0]?.value, { bool: true, single: "A", multi: [] });
+			assert.deepEqual(ui.result()?.answers?.[0]?.value, { bool: false, single: "A", multi: [] });
 			assert.equal(ui.result()?.answers?.[0]?.usedDefault, false);
 		} finally { ui.component.dispose(); }
 	});

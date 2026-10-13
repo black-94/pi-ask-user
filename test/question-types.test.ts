@@ -257,15 +257,16 @@ test("native form uses remaining time and supports cancel, abort, and timeout mi
 test("custom bool renders True and False side by side and submits false", () => {
 	const { component, result } = mount(request({ questions: [{ title: "Proceed?", kind: "bool" }] }));
 	try {
-		assert.match(component.render(60).join("\n"), /\[ \] True\s+\[ \] False \(unset\)/);
-		component.handleInput(K.space);
+		assert.match(component.render(60).join("\n"), /▸ \[ \] True\s+\[ \] False \(unset\)/);
+		component.handleInput(K.space); // select the focused True side
 		const checked = component.render(60).join("\n");
-		assert.match(checked, /\[✓\] True/);
+		assert.match(checked, /▸ \[✓\] True/);
 		assert.match(checked, /\[ \] False/);
 		assert.doesNotMatch(checked, /\[✗\] False/);
-		component.handleInput(K.space);
+		component.handleInput(K.right); // focus moves to False
+		component.handleInput(K.space); // select False
 		const crossed = component.render(60).join("\n");
-		assert.match(crossed, /\[✗\] False/);
+		assert.match(crossed, /▸ \[✗\] False/);
 		assert.match(crossed, /\[ \] True/);
 		assert.doesNotMatch(crossed, /\[✓\] True/);
 		component.handleInput(K.ctrlEnter);
@@ -283,8 +284,9 @@ test("custom bool applies an explicit false default without a truthiness bug", (
 
 test("custom mixed form navigates every field, validates, and submits typed values", () => {
 	const { component, result } = mount(request({ questions: [MIXED_FORM] }));
-	component.handleInput(K.space); // bool -> true
-	component.handleInput(K.space); // bool -> false
+	component.handleInput(K.space); // bool: select the focused True side
+	component.handleInput(K.right); // bool: focus False
+	component.handleInput(K.space); // bool: select False
 	component.handleInput(K.down); // next field
 	component.handleInput(K.down); // single focus -> prod
 	component.handleInput(K.space); // select prod
@@ -339,8 +341,9 @@ test("custom form advances through questionnaire review and preserves typed valu
 		{ title: "Form", kind: "simple-form", fields: [{ name: "ok", label: "OK", kind: "bool", required: true }] },
 		{ title: "Note", kind: "input" },
 	] }));
-	component.handleInput(K.space); // true
-	component.handleInput(K.space); // false
+	component.handleInput(K.space); // bool: select the focused True side
+	component.handleInput(K.right); // focus False
+	component.handleInput(K.space); // select False
 	component.handleInput(K.down); // button
 	component.handleInput(K.enter); // continue to question 2
 	component.handleInput("ready");
@@ -369,15 +372,16 @@ test("custom form keeps focused fields visible and IME cursor positioned in narr
 	component.dispose();
 });
 
-test("custom form Space toggles the boolean value", () => {
+test("custom form Space selects the focused boolean side", () => {
 	const { component, result } = mount(request({ questions: [{ title: "F", kind: "simple-form", fields: [
 		{ name: "ok", label: "OK", kind: "bool", required: true },
 	] }] }));
 	try {
 		component.handleInput(K.space);
-		assert.match(component.render(80).join("\n"), /\[✓\] True/);
+		assert.match(component.render(80).join("\n"), /▸ \[✓\] True/);
+		component.handleInput(K.right);
 		component.handleInput(K.space);
-		assert.match(component.render(80).join("\n"), /\[✗\] False/);
+		assert.match(component.render(80).join("\n"), /▸ \[✗\] False/);
 		component.handleInput(K.ctrlEnter);
 		assert.deepEqual(result()?.answers?.[0]?.value, { ok: false });
 	} finally { component.dispose(); }

@@ -9,7 +9,7 @@ import { AskUserParams, normalizeAskUserRequest } from "../src/schema.ts";
 import { AskUserComponent, type CustomUIResult } from "../src/ui/custom.ts";
 
 const choice = (kind = "single") => ({ title: "Choose", kind, options: [{ label: "A" }, { label: "B" }] });
-const K = { enter: "\r", space: " ", down: "\x1b[B", ctrlEnter: "\x1b[13;5u", tab: "\t" };
+const K = { enter: "\r", space: " ", down: "\x1b[B", left: "\x1b[D", right: "\x1b[C", ctrlEnter: "\x1b[13;5u", tab: "\t" };
 function mount(raw: unknown, rows = 24) {
 	let result: CustomUIResult | undefined;
 	const component = new AskUserComponent({
@@ -114,33 +114,50 @@ test("core rejects free text from a renderer when it is disabled", async () => {
 	assert.equal(result.error?.code, "internal");
 });
 
-test("bool Ctrl+Enter preserves false defaults; Enter toggles and clears usedDefault", () => {
-	for (const toggle of [false, true]) {
-		const { component, result } = mount({ questions: [{ title: "Bool", kind: "bool", default: false }] });
-		try {
-			assert.match(component.render(80).join("\n"), /\[✗\] False \(default\)/);
-			if (toggle) component.handleInput(K.enter);
-			component.handleInput(K.ctrlEnter);
-			assert.equal(result()?.answers?.[0]?.value, toggle);
-			assert.equal(result()?.answers?.[0]?.usedDefault, !toggle);
-		} finally { component.dispose(); }
-	}
+test("bool Ctrl+Enter preserves a false default; selecting True clears usedDefault", () => {
+	// Ctrl+Enter keeps the explicit false default unchanged.
+	const kept = mount({ questions: [{ title: "Bool", kind: "bool", default: false }] });
+	try {
+		assert.match(kept.component.render(80).join("\n"), /\[✗\] False \(default\)/);
+		kept.component.handleInput(K.ctrlEnter);
+		assert.equal(kept.result()?.answers?.[0]?.value, false);
+		assert.equal(kept.result()?.answers?.[0]?.usedDefault, true);
+	} finally { kept.component.dispose(); }
+
+	// Selecting the focused True side reaches true and clears usedDefault.
+	const chosen = mount({ questions: [{ title: "Bool", kind: "bool", default: false }] });
+	try {
+		chosen.component.handleInput(K.left); // focus True
+		chosen.component.handleInput(K.enter); // select True + submit
+		assert.equal(chosen.result()?.answers?.[0]?.value, true);
+		assert.equal(chosen.result()?.answers?.[0]?.usedDefault, false);
+	} finally { chosen.component.dispose(); }
 });
 
-test("form bool is one horizontal control and confirms/toggles false defaults", () => {
-	for (const toggle of [false, true]) {
-		const { component, result } = mount({ questions: [{ title: "Form", kind: "simple-form", fields: [
-			{ name: "enabled", label: "Enabled", kind: "bool", default: false, required: true },
-		] }] });
-		try {
-			const text = component.render(80).join("\n");
-			assert.equal(text.split("\n").filter((line) => line.includes("[✗] False")).length, 1);
-			assert.match(text, /\[ \] True\s+\[✗\] False/);
-			if (toggle) component.handleInput(K.enter);
-			component.handleInput(K.down); // Submit button
-			component.handleInput(K.enter);
-			assert.deepEqual(result()?.answers?.[0]?.value, { enabled: toggle });
-			assert.equal(result()?.answers?.[0]?.usedDefault, !toggle);
-		} finally { component.dispose(); }
-	}
+test("form bool is one horizontal control; selecting the focused side overrides a false default", () => {
+	// Ctrl+Enter keeps the explicit false default.
+	const kept = mount({ questions: [{ title: "Form", kind: "simple-form", fields: [
+		{ name: "enabled", label: "Enabled", kind: "bool", default: false, required: true },
+	] }] });
+	try {
+		const text = kept.component.render(80).join("\n");
+		assert.equal(text.split("\n").filter((line) => line.includes("[✗] False")).length, 1);
+		assert.match(text, /\[ \] True\s+▸ \[✗\] False/);
+		kept.component.handleInput(K.down); // Submit button
+		kept.component.handleInput(K.enter);
+		assert.deepEqual(kept.result()?.answers?.[0]?.value, { enabled: false });
+		assert.equal(kept.result()?.answers?.[0]?.usedDefault, true);
+	} finally { kept.component.dispose(); }
+
+	// Selecting the focused True side overrides the default.
+	const chosen = mount({ questions: [{ title: "Form", kind: "simple-form", fields: [
+		{ name: "enabled", label: "Enabled", kind: "bool", default: false, required: true },
+	] }] });
+	try {
+		chosen.component.handleInput(K.left); // focus True
+		chosen.component.handleInput(K.enter); // select True + advance to Submit
+		chosen.component.handleInput(K.enter); // submit
+		assert.deepEqual(chosen.result()?.answers?.[0]?.value, { enabled: true });
+		assert.equal(chosen.result()?.answers?.[0]?.usedDefault, false);
+	} finally { chosen.component.dispose(); }
 });
