@@ -371,34 +371,38 @@ hidden, restore it first with its show/hide key before pressing `Alt+Q`.
 In the custom terminal UI, all question kinds share the same controls:
 
 - `Tab` / `Shift+Tab` switches question/review tabs, including from forms.
-- Up/left moves focus backward; down/right moves it forward. Arrows never
-  change values or selections. A standalone boolean has only one focus target,
-  so arrows leave it unchanged.
+- Up/down moves control focus backward/forward. Left/right does the same
+  outside text inputs; inside text inputs it moves the text cursor instead.
+  Arrows never change values or selections. A standalone boolean has only one
+  focus target, so arrows leave it unchanged.
 - `Space` toggles booleans/multiple-choice selections or selects the focused
   single-choice option. In a text input, Space inserts a space.
-- `Enter` selects the focused single-choice option or toggles the focused
-  multiple-choice/boolean control, keeping focus in place. In text inputs and
-  on Continue/Submit buttons, it confirms/continues instead.
+- `Enter` selects the focused single-choice option or toggles the boolean,
+  then continues to the next question (or submits a one-question questionnaire).
+  On multiple-choice options it only toggles, keeping focus in place. In text
+  inputs and on Continue/Submit buttons, it confirms/continues.
 - `Ctrl+Enter` validates and submits the whole questionnaire without changing
   the focused control. Required unanswered questions block submission; defaults
   can still be used.
 
 A standalone `bool` shows **one** control: `[✓] True` or `[✗] False`.
 An unset boolean shows `[ ] True (unset)` and becomes true when Enter or Space
-is pressed. Defaults are displayed immediately; Enter or
-Space toggles them, while Ctrl+Enter submits them unchanged. `false` is an
+is pressed. Defaults are displayed immediately; Enter toggles and continues,
+Space only toggles, while Ctrl+Enter submits them unchanged. `false` is an
 answered value, never an empty answer.
 
 A `simple-form` is one question tab with all fields in one scrollable view:
 
-- Arrows move through fields, choice options, and the Continue/Submit button.
-  Moving beyond a field's first/last option focuses the adjacent field/button.
-  Focus stops at the beginning/end of the form.
+- Up/down moves through fields, choice options, and the Continue/Submit button.
+  Left/right also navigates outside text inputs; inside text inputs it moves
+  the text cursor. Moving beyond a field's first/last option focuses the adjacent
+  field/button. Focus stops at the beginning/end of the form.
 - `Tab` / `Shift+Tab` switches question/review tabs, preserving field focus and values.
   `Ctrl+Left` / `Ctrl+Right` remains an alternate question-tab shortcut.
-- `Enter` or `Space` toggles boolean/multi fields and selects single-choice
-  options without moving focus. Use arrows to reach the next field or button;
-  text fields still use `Enter` to move on. Optional unset fields remain omitted.
+- `Enter` toggles boolean fields or selects single-choice options, then moves
+  to the next field or Continue/Submit button. `Space` changes the value without
+  moving focus. For multi fields, both keys only toggle; use arrows to move on.
+  Text fields also use `Enter` to move on. Optional unset fields remain omitted.
 - `Ctrl+Enter` validates and submits the questionnaire. Required missing/empty
   fields focus the first invalid field. `PageUp` / `PageDown` scrolls long form
   or preview content.
@@ -407,8 +411,8 @@ A `simple-form` is one question tab with all fields in one scrollable view:
 The active form field's input or selected option is automatically scrolled into view. Rendering is bounded
 by both terminal width and rows, including narrow/short terminals. Focus is
 propagated to Pi's `Input`, so the hardware cursor marker remains available to
-Chinese/Japanese/Korean IMEs. Plain arrows are reserved for control focus even
-inside text fields; use `Ctrl+B` / `Ctrl+F` or `Home` / `End` to move the text cursor.
+Chinese/Japanese/Korean IMEs. Inside text fields, Left/Right moves the text
+cursor, as do `Ctrl+B` / `Ctrl+F` and `Home` / `End`; Up/Down changes control focus.
 Native dialogs are host-owned and use the host's keyboard controls; this custom
 terminal key mapping does not override native TUI/RPC/ACP dialogs.
 

@@ -53,8 +53,7 @@ test("disabled extra input cannot receive focus or hidden text from typing/down"
 		component.handleInput(K.down);
 		assert.ok(!component.render(80).join("\n").includes(CURSOR_MARKER));
 		component.handleInput(K.enter);
-		assert.equal(result(), undefined);
-		component.handleInput(K.ctrlEnter);
+		assert.equal(result()?.kind, "submitted");
 		assert.deepEqual(result()?.answers?.[0]?.selections, ["B"]);
 		assert.equal(result()?.answers?.[0]?.freeText, undefined);
 	} finally { component.dispose(); }

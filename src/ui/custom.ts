@@ -119,10 +119,10 @@ function printableText(data: string): string | undefined {
 	return data;
 }
 
-/** Direction keys only move focus; they never edit a control's value. */
-function focusDirection(data: string): -1 | 1 | undefined {
-	if (matchesKey(data, Key.up) || matchesKey(data, Key.left) || matchesKey(data, "ctrl+p")) return -1;
-	if (matchesKey(data, Key.down) || matchesKey(data, Key.right) || matchesKey(data, "ctrl+n")) return 1;
+/** In text inputs, horizontal arrows belong to the text cursor, not focus navigation. */
+function focusDirection(data: string, editingText: boolean): -1 | 1 | undefined {
+	if (matchesKey(data, Key.up) || (!editingText && matchesKey(data, Key.left)) || matchesKey(data, "ctrl+p")) return -1;
+	if (matchesKey(data, Key.down) || (!editingText && matchesKey(data, Key.right)) || matchesKey(data, "ctrl+n")) return 1;
 	return undefined;
 }
 
@@ -353,6 +353,12 @@ export class AskUserComponent implements Component, Focusable {
 		return this.rowIndex() >= this.currentQuestion().options.length;
 	}
 
+	private isEditingText(): boolean {
+		if (this.isReview) return false;
+		const form = this.forms[this.tab];
+		return this.isInputRow() || this.currentQuestion().fields?.[form?.active ?? -1]?.kind === "input";
+	}
+
 	private moveTab(delta: number): void {
 		// Preserve typed text on the tab being left.
 		this.syncAllDrafts();
@@ -465,9 +471,7 @@ export class AskUserComponent implements Component, Focusable {
 			this.scrollBy(1);
 			return true;
 		}
-		const form = this.forms[this.tab];
-		const formField = !this.isReview ? this.currentQuestion().fields?.[form?.active ?? -1] : undefined;
-		if (this.isInputRow() || formField?.kind === "input") return false;
+		if (this.isEditingText()) return false;
 		if (matchesKey(data, "ctrl+u") || data === "[") {
 			this.scrollBy(-1);
 			return true;
@@ -580,7 +584,8 @@ export class AskUserComponent implements Component, Focusable {
 			if (!matchesKey(data, Key.space) && !matchesKey(data, Key.enter)) return;
 			this.setFormValue(field, typeof current === "boolean" ? !current : true, fieldIndex);
 			this.syncFormDraft(this.tab);
-			this.refresh();
+			if (matchesKey(data, Key.enter)) this.advanceFormField();
+			else this.refresh();
 			return;
 		}
 		if (matchesKey(data, Key.space) || matchesKey(data, Key.enter)) {
@@ -594,6 +599,10 @@ export class AskUserComponent implements Component, Focusable {
 		} else return;
 		form.optionCursors[fieldIndex] = cursor;
 		this.syncFormDraft(this.tab);
+		if (field.kind === "single" && matchesKey(data, Key.enter)) {
+			this.advanceFormField();
+			return;
+		}
 		this.resetScroll();
 		this.refresh();
 	}
@@ -636,7 +645,7 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 		if (this.isScrollKey(data)) return;
-		const direction = focusDirection(data);
+		const direction = focusDirection(data, this.isEditingText());
 		if (!this.isReview && this.currentQuestion().kind === "simple-form") {
 			if (direction !== undefined) this.moveFormRow(direction);
 			else this.handleFormInput(data);
@@ -667,7 +676,8 @@ export class AskUserComponent implements Component, Focusable {
 			const next = draft.valueSet && typeof draft.value === "boolean" ? !draft.value : true;
 			this.drafts[this.tab] = { selections: [], freeText: "", usedDefault: false, value: next, valueSet: true };
 			this.notice = undefined;
-			this.refresh();
+			if (matchesKey(data, Key.enter)) this.commitAndAdvance();
+			else this.refresh();
 			return;
 		}
 		if (question.kind === "input") {
@@ -702,8 +712,11 @@ export class AskUserComponent implements Component, Focusable {
 				this.drafts[this.tab]!.selections = [this.rowIndex()];
 				this.drafts[this.tab]!.usedDefault = false;
 				this.notice = undefined;
-				this.resetScroll();
-				this.refresh();
+				if (matchesKey(data, Key.enter)) this.commitAndAdvance();
+				else {
+					this.resetScroll();
+					this.refresh();
+				}
 			}
 			return;
 		}
@@ -1155,11 +1168,12 @@ export class AskUserComponent implements Component, Focusable {
 		}
 		const question = this.currentQuestion();
 		if (question.kind === "simple-form") {
-			const hints = ["Tab switch question", "Arrows focus"];
+			const hints = ["Tab switch question", this.isEditingText() ? "↑/↓ focus · ←/→ cursor" : "Arrows focus"];
 			const form = this.forms[this.tab]!;
 			const field = question.fields?.[form.active];
-			if (field?.kind === "multi" || field?.kind === "bool") hints.push("Enter/Space toggle");
-			else if (field?.kind === "single") hints.push("Enter/Space select");
+			if (field?.kind === "multi") hints.push("Enter/Space toggle");
+			else if (field?.kind === "bool") hints.push("Enter toggle & next", "Space toggle");
+			else if (field?.kind === "single") hints.push("Enter select & next", "Space select");
 			else if (field) hints.push("Enter next");
 			else hints.push("Enter continue");
 			hints.push("Ctrl+Enter submit");
@@ -1167,13 +1181,14 @@ export class AskUserComponent implements Component, Focusable {
 			return withControls(hints);
 		}
 		if (question.kind === "bool") {
-			const hints = ["Enter/Space toggle", "Ctrl+Enter submit", "Tab switch"];
+			const hints = ["Enter toggle & next", "Space toggle", "Ctrl+Enter submit", "Tab switch"];
 			if (question.hasDefault) hints.push("s use default");
 			return withControls(hints);
 		}
-		const hints = ["Tab switch", "Arrows focus"];
+		const hints = ["Tab switch", this.isEditingText() ? "↑/↓ focus · ←/→ cursor" : "Arrows focus"];
 		if (this.isInputRow()) hints.push("Enter confirm");
-		else hints.push(question.kind === "multi" ? "Enter/Space toggle" : "Enter/Space select");
+		else if (question.kind === "multi") hints.push("Enter/Space toggle");
+		else hints.push("Enter select & next", "Space select");
 		hints.push("Ctrl+Enter submit");
 		if (question.hasDefault) hints.push("s use default");
 		if (this.viewport.maxScroll > 0) hints.push("PgUp/PgDn preview");
