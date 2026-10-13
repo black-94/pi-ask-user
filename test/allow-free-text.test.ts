@@ -127,7 +127,7 @@ test("bool Ctrl+Enter preserves false defaults; Enter toggles and clears usedDef
 	}
 });
 
-test("form bool is a single control and confirms/toggles false defaults", () => {
+test("form bool is one horizontal control and confirms/toggles false defaults", () => {
 	for (const toggle of [false, true]) {
 		const { component, result } = mount({ questions: [{ title: "Form", kind: "simple-form", fields: [
 			{ name: "enabled", label: "Enabled", kind: "bool", default: false, required: true },
@@ -135,7 +135,7 @@ test("form bool is a single control and confirms/toggles false defaults", () => 
 		try {
 			const text = component.render(80).join("\n");
 			assert.equal(text.split("\n").filter((line) => line.includes("[✗] False")).length, 1);
-			assert.doesNotMatch(text, /True/);
+			assert.match(text, /\[ \] True\s+\[✗\] False/);
 			if (toggle) component.handleInput(K.enter);
 			component.handleInput(K.down); // Submit button
 			component.handleInput(K.enter);

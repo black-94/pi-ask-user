@@ -1,6 +1,6 @@
 {
   "name": "@black942026/pi-ask-user",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Structured user questions for Pi, with interactive terminal dialogs, native input dialogs, and a reusable TypeScript API.",
   "type": "module",
   "license": "MIT",

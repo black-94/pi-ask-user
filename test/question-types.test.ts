@@ -254,18 +254,20 @@ test("native form uses remaining time and supports cancel, abort, and timeout mi
 	assert.equal(abortCalls, 2);
 });
 
-test("custom bool uses one toggle control and submits false", () => {
+test("custom bool renders True and False side by side and submits false", () => {
 	const { component, result } = mount(request({ questions: [{ title: "Proceed?", kind: "bool" }] }));
 	try {
-		assert.match(component.render(60).join("\n"), /\[ \] True \(unset\)/);
+		assert.match(component.render(60).join("\n"), /\[ \] True\s+\[ \] False \(unset\)/);
 		component.handleInput(K.space);
 		const checked = component.render(60).join("\n");
 		assert.match(checked, /\[✓\] True/);
-		assert.doesNotMatch(checked, /False/);
+		assert.match(checked, /\[ \] False/);
+		assert.doesNotMatch(checked, /\[✗\] False/);
 		component.handleInput(K.space);
 		const crossed = component.render(60).join("\n");
 		assert.match(crossed, /\[✗\] False/);
-		assert.doesNotMatch(crossed, /True/);
+		assert.match(crossed, /\[ \] True/);
+		assert.doesNotMatch(crossed, /\[✓\] True/);
 		component.handleInput(K.ctrlEnter);
 		assert.equal(result()?.kind, "submitted");
 		assert.equal(result()?.answers?.[0]?.value, false);
@@ -318,7 +320,7 @@ test("custom form blocks missing required fields and applies typed defaults", ()
 test("custom form Tab switches questions while arrows move field focus", () => {
 	const { component } = mount(request({ questions: [MIXED_FORM, { title: "After", kind: "input" }] }));
 	try {
-		component.handleInput(K.right);
+		component.handleInput(K.down); // leave the bool field for the next field
 		assert.match(component.render(80).join("\n"), /▸ Target/);
 		component.handleInput(K.tab);
 		assert.match(component.render(80).join("\n"), /2\/2\. After/);
@@ -422,7 +424,7 @@ test("typed controls and form text stay visible even in one-to-five-row terminal
 		try {
 			assert.match(bool.component.render(40).join("\n"), /True/);
 			bool.component.handleInput(K.down);
-			assert.match(bool.component.render(40).join("\n"), /True \(unset\)/);
+			assert.match(bool.component.render(40).join("\n"), /\[ \] True\s+\[ \] False \(unset\)/);
 			bool.component.handleInput(K.space);
 			bool.component.handleInput(K.space);
 			assert.match(bool.component.render(40).join("\n"), /False/);

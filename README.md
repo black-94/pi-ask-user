@@ -373,8 +373,18 @@ In the custom terminal UI, all question kinds share the same controls:
 - `Tab` / `Shift+Tab` switches question/review tabs, including from forms.
 - Up/down moves control focus backward/forward. Left/right does the same
   outside text inputs; inside text inputs it moves the text cursor instead.
-  Arrows never change values or selections. A standalone boolean has only one
-  focus target, so arrows leave it unchanged.
+  Arrows never change values or selections. A standalone `bool` has two
+  horizontal focus targets, so Left/Right moves its focus between **True** and
+  **False**, while Up/Down leaves it unchanged.
+- The focused control gets a **subtle background tint** (the theme's
+  `selectedBg`), drawn only behind the focused option region and removed when
+  the dialog loses focus. It is a low-contrast highlight that adapts to the
+  active light and dark palette, and the control keeps its semantic foreground
+  colors (True/success, False/error, accent, muted) on top of it. Whether a
+  *custom* theme's `selectedBg` foreground pairing stays readable is up to that
+  theme: Pi only documents a body-text contrast floor for the `system` theme,
+  not for arbitrary user themes. The tint marks *focus* only; the
+  check/cross/box markers mark the *selection*, so the two never blur together.
 - `Space` toggles booleans/multiple-choice selections or selects the focused
   single-choice option. In a text input, Space inserts a space.
 - `Enter` selects the focused single-choice option or toggles the boolean,
@@ -385,18 +395,24 @@ In the custom terminal UI, all question kinds share the same controls:
   the focused control. Required unanswered questions block submission; defaults
   can still be used.
 
-A standalone `bool` shows **one** control: `[✓] True` or `[✗] False`.
-An unset boolean shows `[ ] True (unset)` and becomes true when Enter or Space
-is pressed. Defaults are displayed immediately; Enter toggles and continues,
-Space only toggles, while Ctrl+Enter submits them unchanged. `false` is an
-answered value, never an empty answer.
+A standalone `bool` shows **both** choices side by side on one line:
+`[✓] True  [ ] False` or `[ ] True  [✗] False`. Only the selected side carries a
+mark (a check for True, a cross for False); the unselected brackets stay empty.
+An unset boolean shows `[ ] True  [ ] False (unset)` and becomes true when Enter
+or Space is pressed. Defaults are displayed immediately; Enter toggles and
+continues, Space only toggles, while Ctrl+Enter submits them unchanged.
+Left/Right moves the focus highlight between True and False without changing the
+value. `false` is an answered value, never an empty answer.
 
 A `simple-form` is one question tab with all fields in one scrollable view:
 
 - Up/down moves through fields, choice options, and the Continue/Submit button.
   Left/right also navigates outside text inputs; inside text inputs it moves
   the text cursor. Moving beyond a field's first/last option focuses the adjacent
-  field/button. Focus stops at the beginning/end of the form.
+  field/button. A `bool` field is one horizontal True/False control, so
+  Left/Right moves its focus between True and False (and past either end focuses
+  the adjacent field/button), while Up/Down leaves the field. Focus stops at the
+  beginning/end of the form.
 - `Tab` / `Shift+Tab` switches question/review tabs, preserving field focus and values.
   `Ctrl+Left` / `Ctrl+Right` remains an alternate question-tab shortcut.
 - `Enter` toggles boolean fields or selects single-choice options, then moves
@@ -407,6 +423,10 @@ A `simple-form` is one question tab with all fields in one scrollable view:
   fields focus the first invalid field. `PageUp` / `PageDown` scrolls long form
   or preview content.
 - `Esc`, `Alt+Q`, and overlay show/hide keep their existing behavior.
+
+Form choice controls follow the same focus styling as standalone questions: the
+focused `bool` side, `single`, or `multi` option gets the subtle `selectedBg`
+tint, and it disappears when the dialog loses focus.
 
 The active form field's input or selected option is automatically scrolled into view. Rendering is bounded
 by both terminal width and rows, including narrow/short terminals. Focus is

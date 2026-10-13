@@ -21,6 +21,12 @@ export interface AskUserTheme {
 	underline?(text: string): string;
 	strikethrough?(text: string): string;
 	inverse?(text: string): string;
+	/**
+	 * Optional background helper. When present, the focused control region gets a
+	 * subtle background using {@link FOCUS_BG_TOKEN}. A theme without it renders
+	 * no focus background, so the component still works with a minimal theme.
+	 */
+	bg?(color: string, text: string): string;
 }
 
 export interface AskUserTUI {
@@ -52,6 +58,16 @@ export interface AskUserComponentOptions {
 
 /** Terminal/pane width at or above which the preview gets its own column. */
 export const SPLIT_MIN_WIDTH = 90;
+/**
+ * Theme token used for the subtle focus background on the focused control only.
+ * It is Pi's selection background: a low-contrast tint that adapts to the active
+ * light/dark theme. We do not assume any contrast guarantee from an arbitrary
+ * theme — Pi only documents a body-text contrast floor for the `system` theme —
+ * so a custom theme's foreground/background pairing is its own responsibility.
+ * The component keeps each control's semantic foreground colors and only adds
+ * the tint behind them.
+ */
+export const FOCUS_BG_TOKEN = "selectedBg";
 /**
  * Rows needed for the full fixed chrome — title + free-input row + key hints.
  * When the terminal is shorter, rows are dropped in this order: title, then
@@ -106,6 +122,11 @@ function clamp(value: number, min: number, max: number): number {
 	return Math.max(min, Math.min(max, value));
 }
 
+/** Initial horizontal focus for a boolean control: the selected side, else True. */
+function initialBoolFocus(value: boolean | undefined): number {
+	return value === false ? 1 : 0;
+}
+
 /**
  * Return printable text for key input, or `undefined` for control keys and
  * escape sequences. Multi-character paste payloads count as printable.
@@ -132,6 +153,8 @@ interface FormUIState {
 	usedDefaults: Set<string>;
 	inputs: Map<number, Input>;
 	optionCursors: number[];
+	/** Horizontal focus (0 True / 1 False) for each `bool` field; ignored otherwise. */
+	boolCursors: number[];
 	clearedInputs: Set<number>;
 	active: number;
 }
@@ -160,6 +183,7 @@ export class AskUserComponent implements Component, Focusable {
 	private readonly done: (result: CustomUIResult) => void;
 	private readonly drafts: DraftAnswer[];
 	private readonly cursors: number[];
+	private readonly boolCursors: number[];
 	private readonly inputs: Input[];
 	private readonly forms: Array<FormUIState | undefined>;
 	private readonly mdTheme: MarkdownTheme;
@@ -201,6 +225,12 @@ export class AskUserComponent implements Component, Focusable {
 			question.kind === "bool" ? draftFromDefault(question) ?? emptyDraft() : emptyDraft(),
 		);
 		this.cursors = options.request.questions.map(() => 0);
+		this.boolCursors = options.request.questions.map((question, index) => {
+			if (question.kind !== "bool") return 0;
+			const draft = this.drafts[index]!;
+			const value = draft.valueSet && typeof draft.value === "boolean" ? draft.value : undefined;
+			return initialBoolFocus(value);
+		});
 		this.inputs = options.request.questions.map(
 			(question) => new Input({
 				prompt: "› ",
@@ -240,7 +270,10 @@ export class AskUserComponent implements Component, Focusable {
 				}
 				return 0;
 			});
-			return { values, present, usedDefaults, inputs: fieldInputs, optionCursors, clearedInputs: new Set(), active: 0 };
+			const boolCursors = fields.map((field) => field.kind === "bool" && typeof field.default === "boolean"
+				? initialBoolFocus(field.default)
+				: 0);
+			return { values, present, usedDefaults, inputs: fieldInputs, optionCursors, boolCursors, clearedInputs: new Set(), active: 0 };
 		});
 		const remaining = Math.max(0, this.deadline.remainingMs());
 		this.remainingSeconds = Math.ceil(remaining / 1000);
@@ -380,6 +413,16 @@ export class AskUserComponent implements Component, Focusable {
 		this.cursors[this.tab] = this.currentQuestion().options.length;
 	}
 
+	/** Move the horizontal True/False focus of the current (standalone) boolean. */
+	private moveBoolFocus(delta: number): void {
+		const current = this.boolFocusIndex(this.tab);
+		const next = clamp(current + delta, 0, 1);
+		if (next === current) return;
+		this.boolCursors[this.tab] = next;
+		this.notice = undefined;
+		this.refresh();
+	}
+
 	// -- draft synchronisation ----------------------------------------------
 
 	/**
@@ -496,16 +539,34 @@ export class AskUserComponent implements Component, Focusable {
 			if (field && (field.kind === "single" || field.kind === "multi")) {
 				form.optionCursors[next] = delta < 0 ? field.options.length - 1 : 0;
 			}
+			if (field?.kind === "bool") {
+				form.boolCursors[next] = delta < 0 ? 1 : 0;
+			}
 		}
 		this.notice = undefined;
 		this.resetScroll();
 		this.refresh();
 	}
 
-	/** Traverse choice rows, then adjacent fields and the action button. */
-	private moveFormRow(delta: -1 | 1): void {
+	/**
+	 * Traverse choice rows, then adjacent fields and the action button.
+	 *
+	 * Single/multi options move on both axes; a horizontal boolean moves its
+	 * internal True/False focus on Left/Right only, so Up/Down still leaves the
+	 * field (a boolean occupies one vertical row).
+	 */
+	private moveFormRow(delta: -1 | 1, horizontal: boolean): void {
 		const form = this.forms[this.tab]!;
 		const field = this.currentQuestion().fields?.[form.active];
+		if (horizontal && field?.kind === "bool") {
+			const cursor = (form.boolCursors[form.active] ?? 0) + delta;
+			if (cursor >= 0 && cursor <= 1) {
+				form.boolCursors[form.active] = cursor;
+				this.resetScroll();
+				this.refresh();
+				return;
+			}
+		}
 		if (field && (field.kind === "single" || field.kind === "multi")) {
 			const cursor = (form.optionCursors[form.active] ?? 0) + delta;
 			if (cursor >= 0 && cursor < field.options.length) {
@@ -582,7 +643,10 @@ export class AskUserComponent implements Component, Focusable {
 		if (field.kind === "bool") {
 			const current = form.present.has(field.name) ? form.values[field.name] : undefined;
 			if (!matchesKey(data, Key.space) && !matchesKey(data, Key.enter)) return;
-			this.setFormValue(field, typeof current === "boolean" ? !current : true, fieldIndex);
+			const next = typeof current === "boolean" ? !current : true;
+			this.setFormValue(field, next, fieldIndex);
+			// Keep the horizontal focus on whichever side the toggle just chose.
+			form.boolCursors[fieldIndex] = initialBoolFocus(next);
 			this.syncFormDraft(this.tab);
 			if (matchesKey(data, Key.enter)) this.advanceFormField();
 			else this.refresh();
@@ -646,8 +710,9 @@ export class AskUserComponent implements Component, Focusable {
 		}
 		if (this.isScrollKey(data)) return;
 		const direction = focusDirection(data, this.isEditingText());
+		const horizontal = matchesKey(data, Key.left) || matchesKey(data, Key.right);
 		if (!this.isReview && this.currentQuestion().kind === "simple-form") {
-			if (direction !== undefined) this.moveFormRow(direction);
+			if (direction !== undefined) this.moveFormRow(direction, horizontal);
 			else this.handleFormInput(data);
 			return;
 		}
@@ -671,10 +736,17 @@ export class AskUserComponent implements Component, Focusable {
 				this.skipWithDefault();
 				return;
 			}
+			// Horizontal focus between True and False. It is a navigation cursor
+			// independent of the selected value; Space/Enter still toggle the value.
+			if (direction !== undefined && horizontal) {
+				this.moveBoolFocus(direction);
+				return;
+			}
 			if (!matchesKey(data, Key.space) && !matchesKey(data, Key.enter)) return;
 			const draft = this.drafts[this.tab]!;
 			const next = draft.valueSet && typeof draft.value === "boolean" ? !draft.value : true;
 			this.drafts[this.tab] = { selections: [], freeText: "", usedDefault: false, value: next, valueSet: true };
+			this.boolCursors[this.tab] = initialBoolFocus(next);
 			this.notice = undefined;
 			if (matchesKey(data, Key.enter)) this.commitAndAdvance();
 			else this.refresh();
@@ -757,6 +829,9 @@ export class AskUserComponent implements Component, Focusable {
 			return;
 		}
 		this.drafts[this.tab] = fallback;
+		if (question.kind === "bool" && fallback.valueSet) {
+			this.boolCursors[this.tab] = initialBoolFocus(fallback.value as boolean);
+		}
 		this.inputs[this.tab]!.setValue(fallback.freeText);
 		this.notice = undefined;
 		this.resetScroll();
@@ -923,7 +998,8 @@ export class AskUserComponent implements Component, Focusable {
 		const selectedMark = selected ? this.theme.fg("success", box) : this.theme.fg("muted", box);
 		const label = question.options[index]!.label;
 		const labelText = isCursor ? this.theme.fg("accent", this.theme.bold(label)) : label;
-		const lines = [truncateToWidth(`  ${cursorMark} ${selectedMark} ${index + 1}. ${labelText}`, width)];
+		const rowText = `  ${cursorMark} ${selectedMark} ${index + 1}. ${labelText}`;
+		const lines = [truncateToWidth(this.focusBackground(rowText, isCursor && this.focused), width)];
 		const description = question.options[index]!.description;
 		if (description) {
 			// Wrap to the option column instead of hard-truncating the text.
@@ -934,17 +1010,48 @@ export class AskUserComponent implements Component, Focusable {
 		return lines;
 	}
 
-	private renderBoolControl(value: boolean | undefined): string {
-		if (value === undefined) return this.theme.fg("muted", "[ ] True (unset)");
-		return this.theme.fg(value ? "success" : "error", value ? "[✓] True" : "[✗] False");
+	/**
+	 * Subtle background for the focused control region only (never a whole row).
+	 * Returns `text` unchanged when the control is not focused, the component is
+	 * not focused, or the theme supplies no background helper.
+	 */
+	private focusBackground(text: string, active: boolean): string {
+		if (!active || !this.theme.bg) return text;
+		return this.theme.bg(FOCUS_BG_TOKEN, text);
+	}
+
+	private boolFocusIndex(questionIndex: number): number {
+		return clamp(this.boolCursors[questionIndex] ?? 0, 0, 1);
+	}
+
+	/**
+	 * One horizontal boolean control: `[✓] True  [ ] False` (or the mirrored
+	 * selection). The check/cross mark appears only on the selected side and the
+	 * unselected brackets stay empty. The focused side gets a subtle background,
+	 * which is independent of the selection: focus can sit on either side, and
+	 * the selected colors are preserved under the focus background.
+	 */
+	private renderBoolControl(value: boolean | undefined, focusIndex: number, focusActive: boolean): string {
+		const segment = (label: "True" | "False", selected: boolean, color: "success" | "error", mark: string, focused: boolean): string => {
+			const text = selected
+				? this.theme.fg(color, `[${mark}] ${label}`)
+				: this.theme.fg("muted", `[ ] ${label}`);
+			return this.focusBackground(text, focused);
+		};
+		const trueText = segment("True", value === true, "success", "✓", focusActive && focusIndex === 0);
+		const falseText = segment("False", value === false, "error", "✗", focusActive && focusIndex === 1);
+		return `${trueText}  ${falseText}`;
 	}
 
 	private renderBoolOptions(width: number): { lines: string[]; focusLine: number } {
 		const draft = this.drafts[this.tab]!;
 		const value = draft.valueSet && typeof draft.value === "boolean" ? draft.value : undefined;
-		const defaultMark = draft.usedDefault ? this.theme.fg("muted", " (default)") : "";
+		const suffix = draft.usedDefault
+			? this.theme.fg("muted", " (default)")
+			: value === undefined ? this.theme.fg("muted", " (unset)") : "";
+		const control = this.renderBoolControl(value, this.boolFocusIndex(this.tab), this.focused);
 		return {
-			lines: [truncateToWidth(`  ${this.theme.fg("accent", "▸")} ${this.renderBoolControl(value)}${defaultMark}`, width)],
+			lines: [truncateToWidth(`  ${control}${suffix}`, width)],
 			focusLine: 0,
 		};
 	}
@@ -999,7 +1106,12 @@ export class AskUserComponent implements Component, Focusable {
 			if (field.kind === "bool") {
 				const value = form.present.has(field.name) ? form.values[field.name] : undefined;
 				focusLine = lines.length;
-				lines.push(truncateToWidth(`    ${this.renderBoolControl(typeof value === "boolean" ? value : undefined)}`, width));
+				const control = this.renderBoolControl(
+					typeof value === "boolean" ? value : undefined,
+					form.boolCursors[fieldIndex] ?? 0,
+					this.focused,
+				);
+				lines.push(truncateToWidth(`    ${control}`, width));
 				return;
 			}
 
@@ -1010,7 +1122,8 @@ export class AskUserComponent implements Component, Focusable {
 				const at = cursor === optionIndex ? this.theme.fg("accent", "▸") : " ";
 				const selected = field.kind === "single" ? current === option.label : Array.isArray(current) && current.includes(option.label);
 				const box = field.kind === "single" ? (selected ? "◉" : "○") : (selected ? "▣" : "▢");
-				lines.push(truncateToWidth(`    ${at} ${selected ? this.theme.fg("success", box) : this.theme.fg("muted", box)} ${option.label}`, width));
+				const rowText = `    ${at} ${selected ? this.theme.fg("success", box) : this.theme.fg("muted", box)} ${option.label}`;
+				lines.push(truncateToWidth(this.focusBackground(rowText, cursor === optionIndex && this.focused), width));
 				if (option.description) lines.push(...this.wrap(this.theme.fg("muted", `        ${option.description}`), width));
 			});
 			const selectedOption = field.options[cursor];
@@ -1172,7 +1285,7 @@ export class AskUserComponent implements Component, Focusable {
 			const form = this.forms[this.tab]!;
 			const field = question.fields?.[form.active];
 			if (field?.kind === "multi") hints.push("Enter/Space toggle");
-			else if (field?.kind === "bool") hints.push("Enter toggle & next", "Space toggle");
+			else if (field?.kind === "bool") hints.push("←/→ focus", "Enter toggle & next", "Space toggle");
 			else if (field?.kind === "single") hints.push("Enter select & next", "Space select");
 			else if (field) hints.push("Enter next");
 			else hints.push("Enter continue");
@@ -1181,7 +1294,7 @@ export class AskUserComponent implements Component, Focusable {
 			return withControls(hints);
 		}
 		if (question.kind === "bool") {
-			const hints = ["Enter toggle & next", "Space toggle", "Ctrl+Enter submit", "Tab switch"];
+			const hints = ["←/→ focus", "Enter toggle & next", "Space toggle", "Ctrl+Enter submit", "Tab switch"];
 			if (question.hasDefault) hints.push("s use default");
 			return withControls(hints);
 		}
